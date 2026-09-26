@@ -255,28 +255,32 @@ namespace {
     //   hl.window_rule({ match = {...}, no_screen_share = true,
     //                    no_screen_share_cover = "~/x.mp4", no_screen_share_cover_speed = 1.5 })
     // Colon names come from the original plugin, so old configs keep working.
-    enum eField : uint8_t { FIELD_PATH, FIELD_SPEED, FIELD_LOOP, FIELD_HOLD };
+    enum eField : uint8_t { FIELD_PATH, FIELD_SPEED, FIELD_LOOP, FIELD_HOLD, FIELD_SHOW_TO, FIELD_HIDE_FROM };
     struct SEffect {
         const char* name;
         eField      field;
         EffectId    id = 0;
     };
-    std::array<SEffect, 7> g_effects = {{
+    std::array<SEffect, 9> g_effects = {{
         {"no_screen_share_cover", FIELD_PATH},
         {"no_screen_share_cover_speed", FIELD_SPEED},
         {"no_screen_share_cover_loop", FIELD_LOOP},
         {"no_screen_share_cover_hold", FIELD_HOLD},
+        {"no_screen_share_show_to", FIELD_SHOW_TO},
+        {"no_screen_share_hide_from", FIELD_HIDE_FROM},
         {"no_screen_share_cover:path_cover", FIELD_PATH},
         {"no_screen_share_cover:speed", FIELD_SPEED},
         {"no_screen_share_cover:loop", FIELD_LOOP},
     }};
     // Same fields for layer rules (bars, launchers and other layer-shell surfaces):
     //   hl.layer_rule({ match = { namespace = "waybar" }, no_screen_share = true, no_screen_share_cover = "~/x.png" })
-    std::array<SEffect, 7> g_layerEffects = {{
+    std::array<SEffect, 9> g_layerEffects = {{
         {"no_screen_share_cover", FIELD_PATH},
         {"no_screen_share_cover_speed", FIELD_SPEED},
         {"no_screen_share_cover_loop", FIELD_LOOP},
         {"no_screen_share_cover_hold", FIELD_HOLD},
+        {"no_screen_share_show_to", FIELD_SHOW_TO},
+        {"no_screen_share_hide_from", FIELD_HIDE_FROM},
         {"no_screen_share_cover:path_cover", FIELD_PATH},
         {"no_screen_share_cover:speed", FIELD_SPEED},
         {"no_screen_share_cover:loop", FIELD_LOOP},
@@ -386,6 +390,7 @@ namespace {
     // The last matching rule wins, same as in Hyprland itself.
     struct SRuleValues {
         std::optional<std::string> path, speed, loop, hold;
+        std::optional<std::string> showTo, hideFrom; // per-rule capture client lists, override the global ones
     };
 
     // Cursor zoom (cursor:zoom_factor). The screencast copies the monitor image after
@@ -541,6 +546,10 @@ namespace {
         std::optional<std::chrono::steady_clock::time_point> holdUntil; // set once the fade-out is over
     };
     std::unordered_map<uintptr_t, SLastCover> g_lastCovers;
+    // Surfaces kept covered for a moment after they stopped being hidden (see holdUnhidden),
+    // with the rules they had while hidden. Valid only during one capture frame.
+    std::unordered_set<uintptr_t>              g_held;
+    std::unordered_map<uintptr_t, SRuleValues> g_heldRules;
     std::vector<SClosing>                     g_closing;
     constexpr auto                            FADE_BIND_WINDOW = std::chrono::milliseconds(150);
     // Something last covered longer ago than this gets a closing cover only if its
@@ -571,6 +580,8 @@ namespace {
                         case FIELD_SPEED: out.speed = effect.raw; break;
                         case FIELD_LOOP: out.loop = effect.raw; break;
                         case FIELD_HOLD: out.hold = effect.raw; break;
+                        case FIELD_SHOW_TO: out.showTo = effect.raw; break;
+                        case FIELD_HIDE_FROM: out.hideFrom = effect.raw; break;
                     }
                 }
             }
@@ -579,10 +590,14 @@ namespace {
     }
 
     SRuleValues ruleValuesFor(const PHLWINDOW& w) {
+        if (const auto it = g_heldRules.find(reinterpret_cast<uintptr_t>(w.get())); it != g_heldRules.end())
+            return it->second;
         return collectRuleValues<Desktop::Rule::CWindowRule>(w, Desktop::Rule::RULE_TYPE_WINDOW, g_effects);
     }
 
     SRuleValues ruleValuesFor(const PHLLS& l) {
+        if (const auto it = g_heldRules.find(reinterpret_cast<uintptr_t>(l.get())); it != g_heldRules.end())
+            return it->second;
         return collectRuleValues<Desktop::Rule::CLayerRule>(l, Desktop::Rule::RULE_TYPE_LAYER, g_layerEffects);
     }
 
@@ -1052,7 +1067,8 @@ namespace {
             const auto rules = ruleValuesFor(w);
             const auto key   = reinterpret_cast<uintptr_t>(w.get());
             seen.insert(key);
-            g_lastCovers[key] = SLastCover{
+            if (!g_held.contains(key)) // a held cover keeps the time and rules it had
+                g_lastCovers[key] = SLastCover{
                 .win           = w,
                 .mon           = mon,
                 .box           = CBox{pos.x, pos.y, size.x, size.y},
@@ -1142,7 +1158,8 @@ namespace {
             const auto rules = ruleValuesFor(l);
             const auto key   = reinterpret_cast<uintptr_t>(l.get());
             seen.insert(key);
-            g_lastCovers[key] = SLastCover{
+            if (!g_held.contains(key)) // a held cover keeps the time and rules it had
+                g_lastCovers[key] = SLastCover{
                 .layer   = l,
                 .isLayer = true,
                 .mon     = mon,
@@ -1241,11 +1258,10 @@ namespace {
     }
 
     // "grim, obs  wf-recorder" -> contains(exe)
-    bool listHas(const SP<Config::Values::CStringValue>& cfg, const std::string& exe) {
-        if (!cfg || exe.empty())
+    bool listHas(const std::string& list, const std::string& exe) {
+        if (exe.empty())
             return false;
-        const std::string list = cfg->value();
-        size_t            i    = 0;
+        size_t i = 0;
         while (i < list.size()) {
             const auto start = list.find_first_not_of(", \t", i);
             if (start == std::string::npos)
@@ -1262,21 +1278,97 @@ namespace {
         return false;
     }
 
-    bool hasEntries(const SP<Config::Values::CStringValue>& cfg) {
-        return cfg && cfg->value().find_first_not_of(", \t") != std::string::npos;
+    bool hasEntries(const std::string& list) {
+        return list.find_first_not_of(", \t") != std::string::npos;
+    }
+
+    std::string cfgString(const SP<Config::Values::CStringValue>& cfg) {
+        return cfg ? cfg->value() : std::string{};
     }
 
     // Hidden windows are hidden from every capture by default. show_to lets chosen
-    // clients see them (own screenshots); hide_from, if set, hides only from its list.
-    bool hideFrom(Screenshare::CScreenshareFrame* frame) {
-        const bool byHideList = hasEntries(g_cfgHideFrom);
-        if (!byHideList && !hasEntries(g_cfgShowTo))
-            return true; // no lists: the old behaviour, no /proc lookups per frame
-        const auto exe = captureClientExe(frame);
-        NSC_TRACE("capture client: %s\n", exe.empty() ? "(unknown)" : exe.c_str());
-        if (byHideList)
-            return exe.empty() || listHas(g_cfgHideFrom, exe); // unknown client: hide, to be safe
-        return !listHas(g_cfgShowTo, exe);
+    // clients see them (own screenshots); hide_from, if set, hides only from its list
+    // (a client that can't be identified is still covered). A window or layer rule with
+    // its own no_screen_share_show_to / no_screen_share_hide_from uses only those.
+    //
+    // The surfaces this client may see get no_screen_share switched off for the cover
+    // pass as well, so paintCovers treats them as normal windows: no cover, occlusion
+    // and redraws as for any other window.
+    std::vector<SSuppressed> revealFor(Screenshare::CScreenshareFrame* frame, std::unordered_set<uintptr_t>& keys) {
+        std::vector<SSuppressed>   out;
+        const auto                 globalShow = cfgString(g_cfgShowTo);
+        const auto                 globalHide = cfgString(g_cfgHideFrom);
+        const bool                 anyGlobal  = hasEntries(globalShow) || hasEntries(globalHide);
+        std::optional<std::string> exe; // looked up only when some list applies
+        const auto                 client = [&]() -> const std::string& {
+            if (!exe) {
+                exe = captureClientExe(frame);
+                NSC_TRACE("capture client: %s\n", exe->empty() ? "(unknown)" : exe->c_str());
+            }
+            return *exe;
+        };
+        const auto consider = [&](uintptr_t key, Desktop::Types::COverridableVar<bool>& var, const SRuleValues& rules) {
+            const bool        ruleLists = rules.showTo || rules.hideFrom;
+            if (!ruleLists && !anyGlobal)
+                return;
+            const std::string show = ruleLists ? rules.showTo.value_or("") : globalShow;
+            const std::string hide = ruleLists ? rules.hideFrom.value_or("") : globalHide;
+            bool              reveal = false;
+            if (hasEntries(hide))
+                reveal = !client().empty() && !listHas(hide, client());
+            else if (hasEntries(show))
+                reveal = listHas(show, client());
+            if (!reveal)
+                return;
+            std::optional<bool> prev;
+            if (var.hasValue() && var.getPriority() == Desktop::Types::PRIORITY_SET_PROP)
+                prev = var.value();
+            var.set(false, Desktop::Types::PRIORITY_SET_PROP);
+            out.push_back({&var, prev});
+            keys.insert(key);
+        };
+        for (const auto& w : Desktop::windowState()->windows())
+            if (w && w->m_ruleApplicator && w->m_ruleApplicator->noScreenShare().valueOrDefault())
+                consider(reinterpret_cast<uintptr_t>(w.get()), w->m_ruleApplicator->noScreenShare(), ruleValuesFor(w));
+        for (const auto& l : Desktop::layerState()->layers())
+            if (l && l->m_ruleApplicator && l->m_ruleApplicator->noScreenShare().valueOrDefault())
+                consider(reinterpret_cast<uintptr_t>(l.get()), l->m_ruleApplicator->noScreenShare(), ruleValuesFor(l));
+        if (!out.empty())
+            NSC_TRACE("capture client sees %zu hidden surface(s) as they are\n", out.size());
+        return out;
+    }
+
+    // A surface that stops being hidden while it's still on screen keeps its last cover for
+    // the same close_hold / no_screen_share_cover_hold as a closing one: a browser changes
+    // the window title before it repaints, so with a rule that matches the title the old
+    // page would reach the stream for a frame or two when you switch away. Surfaces this
+    // client may see (show_to / hide_from) are not held.
+    std::vector<SSuppressed> holdUnhidden(const std::unordered_set<uintptr_t>& revealed) {
+        std::vector<SSuppressed> out;
+        const auto               now  = std::chrono::steady_clock::now();
+        const auto               keep = [&](uintptr_t key, Desktop::Types::COverridableVar<bool>& var) {
+            if (var.valueOrDefault() || revealed.contains(key))
+                return;
+            const auto it = g_lastCovers.find(key);
+            if (it == g_lastCovers.end() || now - it->second.at >= holdFor(it->second.rules))
+                return;
+            std::optional<bool> prev;
+            if (var.hasValue() && var.getPriority() == Desktop::Types::PRIORITY_SET_PROP)
+                prev = var.value();
+            var.set(true, Desktop::Types::PRIORITY_SET_PROP);
+            out.push_back({&var, prev});
+            g_held.insert(key);
+            g_heldRules[key] = it->second.rules;
+        };
+        for (const auto& w : Desktop::windowState()->windows())
+            if (w && w->m_ruleApplicator && windowMapped(w))
+                keep(reinterpret_cast<uintptr_t>(w.get()), w->m_ruleApplicator->noScreenShare());
+        for (const auto& l : Desktop::layerState()->layers())
+            if (l && l->m_ruleApplicator && viewVisible(l))
+                keep(reinterpret_cast<uintptr_t>(l.get()), l->m_ruleApplicator->noScreenShare());
+        if (!out.empty())
+            NSC_TRACE("holding the cover of %zu surface(s) that just stopped being hidden\n", out.size());
+        return out;
     }
 
     using RenderMonitorFn = void (*)(Screenshare::CScreenshareFrame*);
@@ -1284,19 +1376,6 @@ namespace {
     void hkRenderMonitor(Screenshare::CScreenshareFrame* self) {
         NSC_TRACE("hook: renderMonitor\n");
         const auto original = reinterpret_cast<RenderMonitorFn>(g_hook->m_original);
-        if (!hideFrom(self)) {
-            // a client allowed to see: the frame as it is, no covers and no Hyprland boxes
-            NSC_TRACE("capture client allowed to see hidden windows\n");
-            const auto suppressed = suppressNoScreenShare();
-            try {
-                original(self);
-            } catch (...) {
-                restoreNoScreenShare(suppressed);
-                throw;
-            }
-            restoreNoScreenShare(suppressed);
-            return;
-        }
         // Hyprland's boxes are always switched off and drawn by us: under zoom they land
         // in the wrong place, and they are drawn over everything, including windows that
         // sit on top of a hidden one.
@@ -1308,7 +1387,22 @@ namespace {
             throw;
         }
         restoreNoScreenShare(suppressed);
-        paintCovers(self, true);
+        std::unordered_set<uintptr_t> revealedKeys;
+        const auto                    revealed = revealFor(self, revealedKeys);
+        const auto                    held     = holdUnhidden(revealedKeys);
+        const auto                    restore  = [&] {
+            restoreNoScreenShare(held);
+            restoreNoScreenShare(revealed);
+            g_held.clear();
+            g_heldRules.clear();
+        };
+        try {
+            paintCovers(self, true);
+        } catch (...) {
+            restore();
+            throw;
+        }
+        restore();
     }
 
     template <typename T, typename... Args>

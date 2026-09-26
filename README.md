@@ -104,6 +104,12 @@ flashes in the stream. The cover follows the snapshot until the animation ends, 
 `close_hold` ms (per window or layer rule: `no_screen_share_cover_hold`). `0` covers just the
 animation.
 
+The same hold applies when a window stops being hidden while it stays on screen, e.g. a rule
+that matches the title stops matching. A browser changes the window title before it repaints,
+so when you switch away from a matching tab the old page would otherwise reach the stream for
+a frame or two; set `no_screen_share_cover_hold` (e.g. 300) on such a rule. Clients listed in
+`show_to` get no hold.
+
 By default hidden windows are covered in every capture: portal streams (browsers, Discord,
 OBS via PipeWire) and clients that capture the screen directly (grim, wf-recorder,
 gpu-screen-recorder, OBS with wlrobs). The capture client is told apart by its executable
@@ -113,6 +119,19 @@ hidden windows as they are, for example for your own screenshots. `hide_from =
 clients (here, only from portal streams) and a client that can't be identified is still
 covered. Names are separated by commas or spaces. With both lists empty the plugin never
 looks the client up.
+
+The same lists work per window or layer rule, and then only the rule's own lists apply to
+that surface:
+
+```lua
+hl.window_rule({ match = { class = "org.telegram.desktop" }, no_screen_share = true,
+    no_screen_share_show_to = "grim" })               -- screenshots see it, streams don't
+hl.layer_rule({ match = { namespace = "waybar" }, no_screen_share = true,
+    no_screen_share_hide_from = "xdg-desktop-portal-hyprland" })
+```
+
+A hidden background layer (e.g. the wallpaper) is covered over its whole area, including the
+windows on top of it, the same as Hyprland's own black box.
 
 Cursor zoom (`cursor:zoom_factor`) is handled too: the stream gets the zoomed image, while
 Hyprland places its own `no_screen_share` boxes as if there were no zoom, so they miss the

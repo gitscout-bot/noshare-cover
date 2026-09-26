@@ -2,7 +2,7 @@
 # Rebuild the package after updating hyprland: a plugin built against other
 # headers refuses to load (hash check) instead of crashing the compositor.
 pkgname=hyprland-noshare-cover-git
-pkgver=2.0.11
+pkgver=2.0.12
 pkgrel=1
 pkgdesc="Hyprland plugin: image or video instead of the no_screen_share black box"
 arch=('x86_64' 'aarch64')
@@ -25,7 +25,7 @@ options=('!lto' '!debug')
 
 pkgver() {
     cd noshare-cover
-    printf '2.0.11.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    printf '2.0.12.r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 prepare() {

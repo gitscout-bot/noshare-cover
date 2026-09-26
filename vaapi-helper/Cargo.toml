@@ -1,6 +1,6 @@
 [package]
 name = "noshare-cover-vaapi"
-version = "2.0.11"
+version = "2.0.12"
 edition = "2024"
 description = "VA-API decode helper for noshare-cover, loaded at runtime via dlopen"
 license = "BSD-3-Clause"
