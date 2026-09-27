@@ -216,6 +216,10 @@ impl Source for GifSource {
         Kind::Gif
     }
 
+    fn shown(&mut self) {
+        self.clock.restart();
+    }
+
     fn poll(&mut self, now: Instant) -> Result<Option<Frame>, MediaError> {
         let pos = self.clock.position(now, Some(self.total));
         let target = self.frame_at(pos);
@@ -310,6 +314,23 @@ mod tests {
         g.poll(t0).unwrap();
         g.poll(t0 + ms(150)).unwrap();
         assert_eq!(g.pixel(0, 0), g.bg, "Background disposal restores bg");
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn shown_restarts_the_timeline() {
+        let p = tmp("shown");
+        write_gif(&p, DisposalMethod::Keep);
+        let mut g = GifSource::open(&p, 1.0, false).unwrap();
+        let t0 = Instant::now();
+        assert!(g.poll(t0).unwrap().is_some(), "loader pulls frame 0");
+        // shown for the first time long after the loader was done
+        g.shown();
+        let t1 = t0 + ms(10_000);
+        assert!(g.poll(t1).unwrap().is_none(), "still frame 0, nothing new");
+        assert_eq!(g.shown, Some(0));
+        assert!(g.poll(t1 + ms(150)).unwrap().is_some());
+        assert_eq!(g.shown, Some(1));
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 

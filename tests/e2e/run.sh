@@ -23,7 +23,7 @@ fail() { printf '  \e[31mFAIL\e[0m %s\n' "$*"; FAILS=$((FAILS + 1)); }
 magick -size 640x360 gradient:'#ff00ff-#00ffff' "$WORK/cover.png"
 magick -size 320x180 xc:'#ff8800' "$WORK/rule.png"
 magick -size 320x180 xc:'#00c040' "$WORK/layer.png"
-# 0.35 s per frame: the interval between shots (1.2 s) is not a multiple of the cycle
+# 0.35 s per frame, 1.05 s cycle (see the GIF check below for the shot interval)
 magick -delay 35 -size 64x64 xc:red xc:lime xc:blue -loop 0 "$WORK/anim.gif"
 
 write_config() { # $1: default media, $2: media for the foot-rule rule
@@ -94,9 +94,9 @@ shot rule
 C=$(mean_rgb rule "$(win_box cover-rule)"); read -r r g b <<<"$C"
 [ "$r" -gt 200 ] && [ "$g" -gt 100 ] && [ "$g" -lt 170 ] && [ "$b" -lt 40 ] && pass "no_screen_share_cover from the rule ($C)" || fail "rule did not apply: $C"
 
-check_video() { # file, label
+check_video() { # file, label, [seconds between shots]
     write_config "$1" "$WORK/rule.png"; hctl reload >/dev/null; sleep 2
-    shot v1; sleep 1.2; shot v2
+    shot v1; sleep "${3:-1.2}"; shot v2
     local box c d; box=$(win_box cover-me)
     magick "$WORK/v1.png" -crop "$box" +repage "$WORK/v1c.png"; magick "$WORK/v2.png" -crop "$box" +repage "$WORK/v2c.png"
     local c1; c1=$(mean_rgb v1 "$box"); c=$(mean_rgb v2 "$box"); d=$(diff_rmse v1c v2c)
@@ -128,7 +128,10 @@ echo "== video and GIF"
 check_video "$MEDIA/h264.mp4" "H.264 (mp4)"
 check_video "$MEDIA/av1.mp4" "AV1 (mp4)"
 check_video "$MEDIA/vp9.webm" "VP9 (webm)"
-check_video "$WORK/anim.gif" "GIF"
+# GIF: 3 frames x 0.35 s. The gap between shots must be longer than a frame and
+# shorter than the 1.05 s cycle, otherwise whether the two shots differ depends
+# on where the timeline started (1.2 s is only 0.15 s into the next cycle).
+check_video "$WORK/anim.gif" "GIF" 0.5
 
 echo "== unload / load"
 PID=$(hypr_pid)

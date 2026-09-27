@@ -27,10 +27,6 @@ use pipeline::{Next, Pipeline};
 const IDLE_AFTER: Duration = Duration::from_millis(400);
 /// A frame later than this is dropped instead of shown.
 const DROP_LATE: Duration = Duration::from_millis(80);
-/// How long the first poll of a new cover waits for the first frame. Once per cover:
-/// without it, the first screenshot (grim, stream start) would show
-/// a black rectangle instead of the cover.
-const FIRST_FRAME_WAIT: Duration = Duration::from_millis(120);
 
 #[derive(Default)]
 struct Shared {
@@ -116,21 +112,6 @@ impl Source for VideoSource {
         let mut st = self.sync.lock();
         st.watched = Some(now);
         self.sync.cv.notify_all();
-        if self.sent == 0 && st.generation == 0 {
-            let deadline = Instant::now() + FIRST_FRAME_WAIT;
-            while st.generation == 0 && st.error.is_none() && !st.ended {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                st = self
-                    .sync
-                    .cv
-                    .wait_timeout(st, left)
-                    .map(|(g, _)| g)
-                    .unwrap_or_else(|e| e.into_inner().0);
-            }
-        }
         if let Some(e) = &st.error
             && st.generation == 0
         {

@@ -70,7 +70,9 @@ mod imp {
     use cros_codecs::decoder::stateless::h265::H265;
     use cros_codecs::decoder::stateless::vp8::Vp8;
     use cros_codecs::decoder::stateless::vp9::Vp9;
-    use cros_codecs::decoder::stateless::{DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder};
+    use cros_codecs::decoder::stateless::{
+        DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder,
+    };
     use cros_codecs::decoder::{DecodedHandle, DecoderEvent};
     use cros_codecs::libva::Display;
     use cros_codecs::video_frame::VideoFrame;
@@ -93,25 +95,46 @@ mod imp {
     const POOL_HEADROOM: usize = 2;
 
     pub fn open(node: &str, codec: u32) -> Result<Dec, String> {
-        let display = Display::open_drm_display(node).map_err(|e| format!("VA-API on {node}: {e}"))?;
+        let display =
+            Display::open_drm_display(node).map_err(|e| format!("VA-API on {node}: {e}"))?;
         let gbm = GbmDevice::open(node).map_err(|e| format!("GBM on {node}: {e}"))?;
         let pool = FramePool::new(move |si| {
             Arc::clone(&gbm)
-                .new_frame(Fourcc::from(b"NV12"), si.display_resolution, si.coded_resolution, GbmUsage::Decode)
+                .new_frame(
+                    Fourcc::from(b"NV12"),
+                    si.display_resolution,
+                    si.coded_resolution,
+                    GbmUsage::Decode,
+                )
                 .expect("GBM: failed to allocate an NV12 frame")
         });
         let bm = BlockingMode::Blocking;
         let d = Rc::clone(&display);
         let dec: DynStatelessVideoDecoder<Frame> = match codec {
-            CODEC_H264 => StatelessDecoder::<H264, _>::new_vaapi(d, bm).map(|x| x.into_trait_object()),
-            CODEC_HEVC => StatelessDecoder::<H265, _>::new_vaapi(d, bm).map(|x| x.into_trait_object()),
-            CODEC_VP8 => StatelessDecoder::<Vp8, _>::new_vaapi(d, bm).map(|x| x.into_trait_object()),
-            CODEC_VP9 => StatelessDecoder::<Vp9, _>::new_vaapi(d, bm).map(|x| x.into_trait_object()),
-            CODEC_AV1 => StatelessDecoder::<Av1, _>::new_vaapi(d, bm).map(|x| x.into_trait_object()),
+            CODEC_H264 => {
+                StatelessDecoder::<H264, _>::new_vaapi(d, bm).map(|x| x.into_trait_object())
+            }
+            CODEC_HEVC => {
+                StatelessDecoder::<H265, _>::new_vaapi(d, bm).map(|x| x.into_trait_object())
+            }
+            CODEC_VP8 => {
+                StatelessDecoder::<Vp8, _>::new_vaapi(d, bm).map(|x| x.into_trait_object())
+            }
+            CODEC_VP9 => {
+                StatelessDecoder::<Vp9, _>::new_vaapi(d, bm).map(|x| x.into_trait_object())
+            }
+            CODEC_AV1 => {
+                StatelessDecoder::<Av1, _>::new_vaapi(d, bm).map(|x| x.into_trait_object())
+            }
             other => return Err(format!("unknown codec {other}")),
         }
         .map_err(|e| format!("VA-API can't decode this codec on {node}: {e}"))?;
-        Ok(Dec { dec, pool, _display: display, err: String::new() })
+        Ok(Dec {
+            dec,
+            pool,
+            _display: display,
+            err: String::new(),
+        })
     }
 
     impl Dec {
@@ -122,7 +145,11 @@ mod imp {
                 progress = true;
                 match ev {
                     DecoderEvent::FormatChanged => {
-                        let mut si = self.dec.stream_info().ok_or("format change without stream_info")?.clone();
+                        let mut si = self
+                            .dec
+                            .stream_info()
+                            .ok_or("format change without stream_info")?
+                            .clone();
                         si.min_num_frames += POOL_HEADROOM;
                         self.pool.resize(&si);
                     }
@@ -154,7 +181,13 @@ mod imp {
             Ok(progress)
         }
 
-        pub fn decode(&mut self, data: &[u8], pts_ns: u64, cb: FrameCb, user: *mut c_void) -> Result<(), String> {
+        pub fn decode(
+            &mut self,
+            data: &[u8],
+            pts_ns: u64,
+            cb: FrameCb,
+            user: *mut c_void,
+        ) -> Result<(), String> {
             let mut off = 0;
             let mut stalls = 0;
             while off < data.len() {
@@ -202,7 +235,9 @@ mod imp {
     pub fn with_dec(h: *mut c_void, f: impl FnOnce(&mut Dec) -> Result<(), String>) -> i32 {
         guard(-2, || {
             // SAFETY: h comes from nsc_vaapi_open and hasn't been closed yet.
-            let Some(d) = (unsafe { h.cast::<Dec>().as_mut() }) else { return -1 };
+            let Some(d) = (unsafe { h.cast::<Dec>().as_mut() }) else {
+                return -1;
+            };
             match f(d) {
                 Ok(()) => 0,
                 Err(e) => {
@@ -219,7 +254,12 @@ mod imp {
 /// # Safety
 /// `node` is a C string; `err` is a buffer of `err_len` bytes or NULL.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nsc_vaapi_open(node: *const c_char, codec: u32, err: *mut c_char, err_len: usize) -> *mut c_void {
+pub unsafe extern "C" fn nsc_vaapi_open(
+    node: *const c_char,
+    codec: u32,
+    err: *mut c_char,
+    err_len: usize,
+) -> *mut c_void {
     #[cfg(target_os = "linux")]
     {
         guard(std::ptr::null_mut(), || {
@@ -247,7 +287,14 @@ pub unsafe extern "C" fn nsc_vaapi_open(node: *const c_char, codec: u32, err: *m
 /// # Safety
 /// `h` comes from `nsc_vaapi_open`; `data` is `len` bytes; `cb` is called synchronously.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nsc_vaapi_decode(h: *mut c_void, data: *const u8, len: usize, pts_ns: u64, cb: FrameCb, user: *mut c_void) -> i32 {
+pub unsafe extern "C" fn nsc_vaapi_decode(
+    h: *mut c_void,
+    data: *const u8,
+    len: usize,
+    pts_ns: u64,
+    cb: FrameCb,
+    user: *mut c_void,
+) -> i32 {
     #[cfg(target_os = "linux")]
     {
         if data.is_null() {

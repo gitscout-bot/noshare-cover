@@ -174,6 +174,30 @@ pub extern "C" fn nsc_begin_frame() {
     })
 }
 
+/// Start opening the cover for a window ahead of the first capture (the shim
+/// calls this when a window or layer gets its no_screen_share rules).
+///
+/// # Safety
+/// `req` is a valid pointer for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsc_prewarm(req: *const NscPlayRequest) {
+    guard((), || {
+        let Some(req) = (unsafe { req.as_ref() }) else {
+            return;
+        };
+        let mut guard = state();
+        let Some(reg) = guard.as_mut() else {
+            return;
+        };
+        let play = reg.settings().default_play().with_rule(
+            unsafe { opt_str(req.rule_path) },
+            unsafe { opt_str(req.rule_speed) },
+            unsafe { opt_str(req.rule_loop) },
+        );
+        reg.warm(&play, Instant::now());
+    })
+}
+
 /// Cover for a window. `false` means nothing to draw.
 ///
 /// # Safety
@@ -377,8 +401,23 @@ mod tests {
             rule_loop: std::ptr::null(),
         };
         let mut out = NscFrame::empty();
-        nsc_begin_frame();
-        assert!(unsafe { nsc_resolve(&req, &mut out) });
+        // covers are opened on a loader thread: resolve until the first frame lands
+        let resolve = |req: &NscPlayRequest, out: &mut NscFrame| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                nsc_begin_frame();
+                if unsafe { nsc_resolve(req, out) } {
+                    return true;
+                }
+                nsc_end_frame();
+                // nothing is being opened any more (missing file, error): settled
+                if !nsc_animating() || std::time::Instant::now() > end {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        assert!(resolve(&req, &mut out));
         assert_eq!(
             (out.kind, out.width, out.height, out.stride),
             (NSC_FRAME_CPU, 4, 3, 16)
@@ -395,8 +434,7 @@ mod tests {
             rule_speed: std::ptr::null(),
             rule_loop: std::ptr::null(),
         };
-        nsc_begin_frame();
-        assert!(!unsafe { nsc_resolve(&req2, &mut out) });
+        assert!(!resolve(&req2, &mut out));
         nsc_end_frame();
         let mut buf = [0 as c_char; 256];
         let n = unsafe { nsc_take_notification(buf.as_mut_ptr(), buf.len()) };
@@ -415,8 +453,7 @@ mod tests {
             rule_speed: std::ptr::null(),
             rule_loop: std::ptr::null(),
         };
-        nsc_begin_frame();
-        unsafe { nsc_resolve(&req3, &mut out) };
+        resolve(&req3, &mut out);
         let mut small = [0 as c_char; 8];
         let n = unsafe { nsc_take_notification(small.as_mut_ptr(), small.len()) };
         assert!(n < 8);

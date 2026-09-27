@@ -95,6 +95,7 @@ void     nsc_set_settings(const nsc_settings* settings);
 uint64_t nsc_epoch(void);
 void     nsc_begin_frame(void);
 bool     nsc_resolve(const nsc_play_request* request, nsc_frame* out);
+void     nsc_prewarm(const nsc_play_request* request);
 void     nsc_end_frame(void);
 bool     nsc_animating(void);
 bool     nsc_cover_alive(uint64_t cover_id);

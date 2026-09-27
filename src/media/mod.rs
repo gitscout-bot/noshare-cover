@@ -38,6 +38,12 @@ pub trait Source: Send {
     /// the last call (the shim keeps drawing the old texture). For video, `now`
     /// also signals "someone is watching": without calls the decoder goes to sleep.
     fn poll(&mut self, now: Instant) -> Result<Option<Frame>, MediaError>;
+
+    /// The cover reaches the screen for the first time. The loader thread has
+    /// already pulled the first frame, possibly long before (covers are opened
+    /// ahead of the first capture), so a timeline that started there restarts
+    /// here: a GIF that doesn't loop must not have played out unseen.
+    fn shown(&mut self) {}
 }
 
 /// Supported extensions, case-insensitive.

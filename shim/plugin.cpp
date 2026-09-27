@@ -213,6 +213,10 @@ namespace {
     // window/layer close: start the closing cover right when Hyprland unmaps it
     CHyprSignalListener g_onWindowClose;
     CHyprSignalListener g_onLayerClose;
+    CHyprSignalListener g_onWindowOpen;
+    CHyprSignalListener g_onWindowRules;
+    CHyprSignalListener g_onLayerOpen;
+    CHyprSignalListener g_onLayerRules;
 
     // renderMonitor may be hooked by another plugin (gloview takes it while
     // noshare-cover isn't loaded). In that case don't fail the load, keep retrying
@@ -743,6 +747,31 @@ namespace {
         const auto  pos          = w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) + renderOffset;
         const auto  size         = w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
         startClosing(false, reinterpret_cast<uintptr_t>(w.get()), w->m_monitor.lock(), CBox{pos, size}, ruleValuesFor(w), windowRounding(w), windowRoundingPower(w));
+    }
+
+    // Covers are opened on a loader thread, so the first capture of a new cover
+    // would only get the black box: a screenshot has no later frame to catch up
+    // in. Start opening as soon as a hidden window or layer gets its rules.
+    void prewarm(const SRuleValues& rules) {
+        // settings normally arrive with the first capture frame; without them the
+        // warmed cover would be dropped as soon as they do (settings change = reset)
+        pushSettings();
+        const nsc_play_request req{
+            .rule_path  = rules.path ? rules.path->c_str() : nullptr,
+            .rule_speed = rules.speed ? rules.speed->c_str() : nullptr,
+            .rule_loop  = rules.loop ? rules.loop->c_str() : nullptr,
+        };
+        nsc_prewarm(&req);
+    }
+
+    void prewarmWindow(const PHLWINDOW& w) {
+        if (w && w->m_ruleApplicator && w->m_ruleApplicator->noScreenShare().valueOrDefault())
+            prewarm(ruleValuesFor(w));
+    }
+
+    void prewarmLayer(const PHLLS& l) {
+        if (l && l->m_ruleApplicator && l->m_ruleApplicator->noScreenShare().valueOrDefault())
+            prewarm(ruleValuesFor(l));
     }
 
     void onLayerClose(const PHLLS& l) {
@@ -1481,6 +1510,10 @@ namespace {
         g_onReload.reset();
         g_onWindowClose.reset();
         g_onLayerClose.reset();
+        g_onWindowOpen.reset();
+        g_onWindowRules.reset();
+        g_onLayerOpen.reset();
+        g_onLayerRules.reset();
         stopHookRetry();
         stopPump();
         // Remove the hook first: Hyprland cleans up hooks only after PLUGIN_EXIT, and a
@@ -1576,6 +1609,15 @@ namespace {
 
         g_onWindowClose = Event::bus()->m_events.window.close.listen([](PHLWINDOW w) { onWindowClose(w); });
         g_onLayerClose  = Event::bus()->m_events.layer.closed.listen([](PHLLS l) { onLayerClose(l); });
+        g_onWindowOpen  = Event::bus()->m_events.window.open.listen([](PHLWINDOW w) { prewarmWindow(w); });
+        g_onWindowRules = Event::bus()->m_events.window.updateRules.listen([](PHLWINDOW w) { prewarmWindow(w); });
+        g_onLayerOpen   = Event::bus()->m_events.layer.opened.listen([](PHLLS l) { prewarmLayer(l); });
+        g_onLayerRules  = Event::bus()->m_events.layer.updateRules.listen([](PHLLS l) { prewarmLayer(l); });
+        // windows already open when the plugin loads (hyprpm reload, config reload)
+        for (const auto& w : Desktop::windowState()->windows())
+            prewarmWindow(w);
+        for (const auto& l : Desktop::layerState()->layers())
+            prewarmLayer(l);
 
         g_onReload = Event::bus()->m_events.config.reloaded.listen([] {
             pushSettings();

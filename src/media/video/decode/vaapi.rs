@@ -18,6 +18,7 @@ use crate::frame::FrameData;
 use crate::media::video::pipeline::{Codec, DecodedFrame, Decoder, Packet, PipeResult};
 use crate::media::video::yuv::{self, Chroma, ChromaPlanes, Matrix, Plane, YuvImage};
 
+#[cfg(nsc_vaapi_embedded)]
 const HELPER_ABI: u32 = 1;
 
 #[cfg(nsc_vaapi_embedded)]

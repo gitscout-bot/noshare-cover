@@ -5,9 +5,10 @@
 //! otherwise software. Every rejection comes with a reason that is shown
 //! to the user instead of being silently dropped.
 //!
-//! Status: the demuxers (mp4/mov, webm/mkv) and decoders (VA-API, dav1d, openh264)
-//! come in the next step; they need a Linux machine to test. The scaffolding,
-//! clock, thread and lifecycle are done and covered by tests (see pipeline.rs, mod.rs).
+//! Demuxers live in demux.rs (mp4/mov, webm/mkv), decoders in decode/: VA-API
+//! (vaapi-helper), NVDEC, and the CPU fallbacks rav1d (AV1), openh264 (H.264)
+//! and libvpx (VP8/VP9). The clock, decode thread and lifecycle are in
+//! pipeline.rs and mod.rs.
 
 use std::path::Path;
 
