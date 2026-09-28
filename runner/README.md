@@ -27,3 +27,7 @@ docker compose -f runner/compose.yaml up -d --build
 The registration token is streamed to the one-time configuration container;
 the PAT is not stored in the runner or Compose configuration. Runner
 registration and work files are kept in named Docker volumes.
+
+After each job, a runner hook restores ownership of the workspace. This is
+needed because the Arch job container runs its package setup as root while the
+Nix job checks out as the unprivileged runner account.

@@ -35,7 +35,10 @@ RUN mkdir -p /runner \
     && chown -R runner:runner /runner
 
 COPY runner/entrypoint.sh /usr/local/bin/runner-entrypoint
-RUN chmod 0755 /usr/local/bin/runner-entrypoint
+COPY runner/post-job-cleanup.sh /usr/local/bin/post-job-cleanup
+RUN chmod 0755 \
+    /usr/local/bin/runner-entrypoint \
+    /usr/local/bin/post-job-cleanup
 
 WORKDIR /runner
 ENTRYPOINT ["/usr/local/bin/runner-entrypoint"]

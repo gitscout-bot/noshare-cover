@@ -69,7 +69,9 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-runuser --user runner -- ./run.sh &
+runuser --user runner -- env \
+    "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=${ACTIONS_RUNNER_HOOK_JOB_COMPLETED:?ACTIONS_RUNNER_HOOK_JOB_COMPLETED is required}" \
+    ./run.sh &
 runner_pid=$!
 set +e
 wait "$runner_pid"

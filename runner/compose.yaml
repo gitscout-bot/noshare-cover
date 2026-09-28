@@ -16,6 +16,7 @@ services:
       RUNNER_URL: https://github.com/gitscout-bot/noshare-cover
       RUNNER_NAME: ubuntu
       RUNNER_LABELS: ubuntu
+      ACTIONS_RUNNER_HOOK_JOB_COMPLETED: /usr/local/bin/post-job-cleanup
     volumes:
       - runner-state:/runner
       - docker-cache:/var/lib/docker
