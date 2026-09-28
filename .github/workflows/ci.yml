@@ -3,12 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
 
 jobs:
   arch:
     name: Arch (cargo test + plugin build)
-    runs-on: ${{ github.event_name == 'push' && 'ubuntu' || 'ubuntu-latest' }}
+    runs-on: ubuntu
     container: archlinux:latest
     steps:
       - name: Install dependencies
@@ -29,7 +28,7 @@ jobs:
 
   nix:
     name: Nix (packages.default)
-    runs-on: ${{ github.event_name == 'push' && 'ubuntu' || 'ubuntu-latest' }}
+    runs-on: ubuntu
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
