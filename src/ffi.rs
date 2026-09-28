@@ -374,6 +374,8 @@ mod tests {
     // Everything goes through global state, so it's one end-to-end scenario.
     #[test]
     fn full_lifecycle_through_c_abi() {
+        // nsc_shutdown resets the extra-rect clients other tests are using
+        let _serial = crate::extra::test_lock();
         let dir = std::env::temp_dir().join(format!("nsc-ffi-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("c.png");

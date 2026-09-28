@@ -175,6 +175,17 @@ pub fn for_monitor(monitor: i64) -> Vec<CoverRect> {
         .collect()
 }
 
+/// Tests that touch the global client list (directly, or through `nsc_shutdown`,
+/// which calls `reset`) take this lock: they run in parallel, and a reset in one of
+/// them would pull clients out from under another.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_lock() -> MutexGuard<'static, ()> {
+    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Reset on plugin unload.
 pub fn reset() {
     gone_list().clear();
@@ -389,6 +400,7 @@ mod tests {
     // Global state: the whole scenario is one test so parallel tests don't interfere.
     #[test]
     fn api_scenarios() {
+        let _serial = test_lock();
         reset();
 
         // v1 behaves as before
@@ -458,6 +470,7 @@ mod tests {
     fn gone_callbacks_fire_once_and_allow_reentry() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static HITS: AtomicUsize = AtomicUsize::new(0);
+        let _serial = test_lock();
         unsafe extern "C" fn cb(user: *mut std::ffi::c_void) {
             HITS.fetch_add(1, Ordering::SeqCst);
             // the callback calls our functions: must not deadlock
