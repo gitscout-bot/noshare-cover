@@ -15,6 +15,7 @@ RUN apt-get update \
         sudo \
         tar \
         gzip \
+        xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash runner \
@@ -35,10 +36,10 @@ RUN mkdir -p /runner \
     && chown -R runner:runner /runner
 
 COPY runner/entrypoint.sh /usr/local/bin/runner-entrypoint
-COPY runner/post-job-cleanup.sh /usr/local/bin/post-job-cleanup
+COPY runner/post-job-cleanup.sh /usr/local/bin/post-job-cleanup.sh
 RUN chmod 0755 \
     /usr/local/bin/runner-entrypoint \
-    /usr/local/bin/post-job-cleanup
+    /usr/local/bin/post-job-cleanup.sh
 
 WORKDIR /runner
 ENTRYPOINT ["/usr/local/bin/runner-entrypoint"]
