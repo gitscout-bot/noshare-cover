@@ -1,0 +1,27 @@
+name: gitscout-noshare-cover-runner
+
+services:
+  runner:
+    build:
+      context: ..
+      dockerfile: runner/Dockerfile
+    container_name: gitscout-noshare-cover-ubuntu
+    init: true
+    privileged: true
+    cpus: 8.0
+    cpuset: "0-7"
+    restart: unless-stopped
+    stop_grace_period: 2m
+    environment:
+      RUNNER_URL: https://github.com/gitscout-bot/noshare-cover
+      RUNNER_NAME: ubuntu
+      RUNNER_LABELS: ubuntu
+    volumes:
+      - runner-state:/runner
+      - docker-cache:/var/lib/docker
+
+volumes:
+  runner-state:
+    name: gitscout-noshare-cover-runner-state
+  docker-cache:
+    name: gitscout-noshare-cover-docker-cache
