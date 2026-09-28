@@ -4,7 +4,7 @@ version = "2.0.12"
 edition = "2024"
 rust-version = "1.89"
 description = "Hyprland plugin: image or video instead of the no_screen_share black box"
-license = "BSD-3-Clause"
+license = "GPL-3.0-only"
 publish = false
 
 [workspace]

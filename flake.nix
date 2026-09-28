@@ -71,7 +71,7 @@
           meta = {
             description = "Image or video instead of the no_screen_share black box";
             homepage = "https://github.com/gitscout-bot/noshare-cover";
-            license = nixpkgs.lib.licenses.bsd3;
+            license = nixpkgs.lib.licenses.gpl3Only;
           };
         };
     in
