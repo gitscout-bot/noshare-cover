@@ -6,7 +6,9 @@
     # packages.default builds against this Hyprland. Point it at yours so they match:
     #   inputs.noshare-cover.inputs.hyprland.follows = "hyprland";
     # (no nixpkgs.follows here: Hyprland then comes prebuilt from hyprland.cachix.org)
-    hyprland.url = "github:hyprwm/Hyprland";
+    # pinned: Hyprland main after 2026-10-01 (#16440, render context) changed the APIs the
+    # shim uses; this is the last commit the Nix job built against
+    hyprland.url = "github:hyprwm/Hyprland/4bb6844b0351e4fbf2e3d4e46ae71b551a0e0a42";
   };
 
   outputs =
