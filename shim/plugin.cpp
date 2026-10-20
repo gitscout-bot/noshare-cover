@@ -996,6 +996,7 @@ namespace {
         static auto PBLUR = CConfigValue<Config::INTEGER>("decoration:blur:enabled");
         const bool  blur  = *PBLUR && !(w->m_ruleApplicator && w->m_ruleApplicator->noBlur().valueOrDefault());
         const float alpha = windowAlpha(w);
+        const float fade  = windowFade(w);
         res->breadthfirst(
             [&](SP<CWLSurfaceResource> surf, const Vector2D& local, void*) {
                 const auto tex = surf->m_current.texture;
@@ -1010,6 +1011,7 @@ namespace {
                         .tex                   = tex,
                         .box                   = box,
                         .a                     = alpha,
+                        .blurA                 = fade, // the blur fades with the window, as in Hyprland
                         .round                 = main ? geo.round : 0,
                         .roundingPower         = geo.roundingPower,
                         .blur                  = main && blur,
