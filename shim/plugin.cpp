@@ -138,16 +138,6 @@ namespace {
             return w->isFloating(); // main
     }
 
-    template <class WS>
-    bool workspaceSpecial(const WS* ws) {
-        if (!ws)
-            return false;
-        if constexpr (requires { ws->m_isSpecialWorkspace; })
-            return ws->m_isSpecialWorkspace; // 0.56
-        else
-            return ws->type() == decltype(ws->type())::SPECIAL; // main
-    }
-
     template <class W>
     bool windowIsX11(const W& w) {
         if constexpr (requires { w->m_isX11; })
@@ -947,7 +937,7 @@ namespace {
         CBox     box;       // capture pixels
         int      round         = 0;
         float    roundingPower = 2.F;
-        int      layer         = 0; // 0 tiled, 1 floating, +2 on a special workspace
+        int      layer         = 0; // 0 tiled, 1 floating, +2 on a special workspace, 4 pinned
         bool     opaque        = false;
     };
 
@@ -970,7 +960,8 @@ namespace {
         const bool dontRound  = capturePos != Vector2D{} || fullscreen;
         g.round               = dontRound ? 0 : int(std::lround(windowRounding(w) * mon->m_scale * zoomScale(mon)));
         g.roundingPower       = dontRound ? 2.F : windowRoundingPower(w);
-        g.layer               = (workspaceSpecial(ws) ? 2 : 0) + (windowFloating(w) ? 1 : 0);
+        // Hyprland draws pinned windows after the special workspace ("pinned always above")
+        g.layer               = windowPinned(w) ? 4 : (w->onSpecialWorkspace() ? 2 : 0) + (windowFloating(w) ? 1 : 0);
         g.opaque              = windowOpaque(w);
         return g;
     }
@@ -1049,11 +1040,11 @@ namespace {
         const auto capturePos = frame->m_session->m_captureBox.pos();
         const auto now        = std::chrono::steady_clock::now();
 
-        // Windows drawn on top of others: later in the stack (a special workspace over the
-        // regular one, floating over tiled, then list order). A cover is only drawn where
-        // its window is actually visible, so an opaque window placed over a hidden one
-        // stays visible. Layers (bars) are left alone: they are often translucent and we
-        // can't tell.
+        // Windows drawn on top of others: later in the stack (pinned over everything, a
+        // special workspace over the regular one, floating over tiled, then list order).
+        // A cover is only drawn where its window is actually visible, so an opaque window
+        // placed over a hidden one stays visible. Layers (bars) are left alone: they are
+        // often translucent and we can't tell.
         struct SVisible {
             PHLWINDOW w;
             SWinGeo   geo;
