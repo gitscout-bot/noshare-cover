@@ -946,7 +946,9 @@ namespace {
             return std::nullopt;
         const auto  fade = windowFade(w);
         const auto* ws   = w->m_workspace.get();
-        if (!ws && fade != 0.F)
+        // nothing on screen: no workspace, or faded out behind a fullscreen or maximized
+        // window (shouldRenderWindow still lets those through while the workspace slides in)
+        if (!ws || fade == 0.F)
             return std::nullopt;
 
         SWinGeo    g;
