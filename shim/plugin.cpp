@@ -967,7 +967,9 @@ namespace {
         g.roundingPower       = dontRound ? 2.F : windowRoundingPower(w);
         // Hyprland draws pinned windows after the special workspace ("pinned always above")
         g.layer               = windowPinned(w) ? 4 : (w->onSpecialWorkspace() ? 2 : 0) + (windowFloating(w) ? 1 : 0);
-        g.opaque              = windowOpaque(w);
+        // Hyprland's opaque() ignores the layout alpha: a group tab or monocle window that
+        // is fading out on a switch would still count as opaque and cut the cover below it
+        g.opaque              = fade >= 1.F && windowOpaque(w);
         return g;
     }
 
