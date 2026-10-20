@@ -165,11 +165,14 @@ namespace {
             return w->m_isMapped; // 0.56
     }
 
+    // the layout alpha is how a group hides its inactive tabs
     float windowFade(const PHLWINDOW& w) {
 #ifdef NSC_SPLIT_WINDOW
-        return w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN);
+        return w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) *
+            w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_LAYOUT);
 #else
-        return w->alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN);
+        return w->alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) *
+            w->alphaValue(Desktop::View::WINDOW_ALPHA_LAYOUT);
 #endif
     }
 
