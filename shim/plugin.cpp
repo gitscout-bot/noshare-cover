@@ -937,7 +937,7 @@ namespace {
         CBox     box;       // capture pixels
         int      round         = 0;
         float    roundingPower = 2.F;
-        bool     floating      = false;
+        int      layer         = 0; // 0 tiled, 1 floating, +2 on a special workspace, 4 pinned
         bool     opaque        = false;
     };
 
@@ -962,7 +962,8 @@ namespace {
         const bool dontRound  = capturePos != Vector2D{} || fullscreen;
         g.round               = dontRound ? 0 : int(std::lround(windowRounding(w) * mon->m_scale * zoomScale(mon)));
         g.roundingPower       = dontRound ? 2.F : windowRoundingPower(w);
-        g.floating            = windowFloating(w);
+        // Hyprland draws pinned windows after the special workspace ("pinned always above")
+        g.layer               = windowPinned(w) ? 4 : (w->onSpecialWorkspace() ? 2 : 0) + (windowFloating(w) ? 1 : 0);
         g.opaque              = windowOpaque(w);
         return g;
     }
@@ -1041,10 +1042,11 @@ namespace {
         const auto capturePos = frame->m_session->m_captureBox.pos();
         const auto now        = std::chrono::steady_clock::now();
 
-        // Windows drawn on top of others: later in the stack (floating over tiled, then
-        // list order). A cover is only drawn where its window is actually visible, so an
-        // opaque window placed over a hidden one stays visible. Layers (bars) are left
-        // alone: they are often translucent and we can't tell.
+        // Windows drawn on top of others: later in the stack (pinned over everything, a
+        // special workspace over the regular one, floating over tiled, then list order).
+        // A cover is only drawn where its window is actually visible, so an opaque window
+        // placed over a hidden one stays visible. Layers (bars) are left alone: they are
+        // often translucent and we can't tell.
         struct SVisible {
             PHLWINDOW w;
             SWinGeo   geo;
@@ -1058,7 +1060,7 @@ namespace {
         const auto isAbove = [&](size_t o, size_t me) {
             const auto& a = visible[o].geo;
             const auto& b = visible[me].geo;
-            return o != me && ((a.floating && !b.floating) || (a.floating == b.floating && o > me));
+            return o != me && (a.layer > b.layer || (a.layer == b.layer && o > me));
         };
         const auto visibleRegion = [&](size_t i) {
             CRegion region{visible[i].geo.box};
@@ -1145,7 +1147,7 @@ namespace {
         if (!drawn.empty()) {
             std::vector<size_t> order(visible.size());
             std::iota(order.begin(), order.end(), size_t{0});
-            std::ranges::stable_sort(order, {}, [&](size_t k) { return visible[k].geo.floating; });
+            std::ranges::stable_sort(order, {}, [&](size_t k) { return visible[k].geo.layer; });
             for (const size_t j : order) {
                 // Never redraw a hidden window from its real content. This also catches
                 // windows that are only translucent for a moment (fading in on open).
