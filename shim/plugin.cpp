@@ -165,11 +165,14 @@ namespace {
             return w->m_isMapped; // 0.56
     }
 
+    // the layout alpha is how a group hides its inactive tabs
     float windowFade(const PHLWINDOW& w) {
 #ifdef NSC_SPLIT_WINDOW
-        return w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN);
+        return w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) *
+            w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_LAYOUT);
 #else
-        return w->alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN);
+        return w->alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) *
+            w->alphaValue(Desktop::View::WINDOW_ALPHA_LAYOUT);
 #endif
     }
 
@@ -964,7 +967,9 @@ namespace {
         g.roundingPower       = dontRound ? 2.F : windowRoundingPower(w);
         // Hyprland draws pinned windows after the special workspace ("pinned always above")
         g.layer               = windowPinned(w) ? 4 : (w->onSpecialWorkspace() ? 2 : 0) + (windowFloating(w) ? 1 : 0);
-        g.opaque              = windowOpaque(w);
+        // Hyprland's opaque() ignores the layout alpha: a group tab or monocle window that
+        // is fading out on a switch would still count as opaque and cut the cover below it
+        g.opaque              = fade >= 1.F && windowOpaque(w);
         return g;
     }
 
@@ -993,6 +998,7 @@ namespace {
         static auto PBLUR = CConfigValue<Config::INTEGER>("decoration:blur:enabled");
         const bool  blur  = *PBLUR && !(w->m_ruleApplicator && w->m_ruleApplicator->noBlur().valueOrDefault());
         const float alpha = windowAlpha(w);
+        const float fade  = windowFade(w);
         res->breadthfirst(
             [&](SP<CWLSurfaceResource> surf, const Vector2D& local, void*) {
                 const auto tex = surf->m_current.texture;
@@ -1007,6 +1013,7 @@ namespace {
                         .tex                   = tex,
                         .box                   = box,
                         .a                     = alpha,
+                        .blurA                 = fade, // the blur fades with the window, as in Hyprland
                         .round                 = main ? geo.round : 0,
                         .roundingPower         = geo.roundingPower,
                         .blur                  = main && blur,
