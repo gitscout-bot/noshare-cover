@@ -22,6 +22,7 @@
 #include <cstring>
 #include <deque>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <list>
@@ -825,7 +826,9 @@ namespace {
                 else if (fade || now >= c.bindUntil)
                     // without a fade-out the hold starts when the search for one ends, right
                     // after the close, not at the next frame: with single shots (nothing
-                    // renders in between) that can be seconds later
+                    // renders in between) that can be seconds later. A fade-out that ended
+                    // with no frame since it was found still counts from now: a late extra
+                    // cover in that rare case, never a missing one.
                     c.holdUntil = (fade ? now : c.bindUntil) + holdFor(c.rules);
             }
             if (c.holdUntil && now >= *c.holdUntil)
@@ -1332,6 +1335,31 @@ namespace {
         return id;
     }
 
+    // A full-path entry with ~ expanded and symlinks resolved, the way /proc/<pid>/exe
+    // shows it (/run/current-system/sw/bin/grim -> /nix/store/<hash>-grim/bin/grim).
+    // Resolved again after a second, not on every frame: a NixOS switch or a package
+    // update moves the target while the config stays the same.
+    struct SResolvedPath {
+        std::string                           path;
+        std::chrono::steady_clock::time_point at;
+    };
+    std::unordered_map<std::string, SResolvedPath> g_resolvedPaths;
+
+    const std::string& resolvedPath(std::string_view entry) {
+        const auto now       = std::chrono::steady_clock::now();
+        auto [it, inserted] = g_resolvedPaths.try_emplace(std::string(entry));
+        if (inserted || now - it->second.at >= std::chrono::seconds(1)) {
+            std::string raw(entry);
+            if (raw.starts_with("~/"))
+                if (const char* home = std::getenv("HOME"))
+                    raw = home + raw.substr(1);
+            std::error_code ec;
+            const auto      canon = std::filesystem::weakly_canonical(raw, ec);
+            it->second            = {ec ? raw : canon.string(), now};
+        }
+        return it->second.path;
+    }
+
     // "grim, /usr/bin/obs  wf-recorder" -> contains(id). An entry with a slash is a full
     // path and matches only that executable, so a copy elsewhere doesn't pass.
     bool listHas(const std::string& list, const SClientId& id) {
@@ -1345,13 +1373,13 @@ namespace {
             const auto end   = list.find_first_of(", \t", start);
             const auto entry = std::string_view(list).substr(start, end == std::string::npos ? std::string::npos : end - start);
             if (id.fromComm) {
-                // only hide_from gets here (show_to never lets a comm name through, see
-                // sees), so a match only hides more: compare with the entry's file name,
-                // cut to 15 chars like comm (xdg-desktop-portal-hyprland -> xdg-desktop-por)
+                // show_to never lets a comm name through (see sees), so for hide_from a
+                // match only hides more: compare with the entry's file name, cut to 15
+                // chars like comm (xdg-desktop-portal-hyprland -> xdg-desktop-por)
                 const auto file = entry.substr(entry.rfind('/') + 1);
                 if (file == id.name || (id.name.size() == 15 && file.size() > 15 && file.starts_with(id.name)))
                     return true;
-            } else if (entry.contains('/') ? entry == id.path : entry == id.name)
+            } else if (entry.contains('/') ? resolvedPath(entry) == id.path : entry == id.name)
                 return true;
             i = end;
         }
@@ -1365,6 +1393,9 @@ namespace {
     std::string cfgString(const SP<Config::Values::CStringValue>& cfg) {
         return cfg ? cfg->value() : std::string{};
     }
+
+    // comm names already told about (see sees)
+    std::unordered_set<std::string> g_commWarned;
 
     // Hidden windows are hidden from every capture by default. show_to lets chosen
     // clients see them (own screenshots); hide_from, if set, hides only from its list
@@ -1385,7 +1416,16 @@ namespace {
         }
         if (hasEntries(hide))
             return !id->name.empty() && !listHas(hide, *id);
-        return !id->fromComm && listHas(show, *id);
+        if (id->fromComm) {
+            // it would have been let through by its name: say once why it isn't
+            if (listHas(show, *id) && g_commWarned.insert(id->name).second)
+                notify(std::format("noshare-cover: capture client \"{}\" is known only by its process name "
+                                   "(its /proc/<pid>/exe can't be read), show_to doesn't apply to it",
+                                   id->name),
+                       10000);
+            return false;
+        }
+        return listHas(show, *id);
     }
 
     // The surfaces this client may see get no_screen_share switched off for the cover

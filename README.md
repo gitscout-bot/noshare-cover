@@ -121,9 +121,13 @@ covered. Names are separated by commas or spaces. With both lists empty the plug
 looks the client up.
 
 A name matches any executable with that name; an entry with a slash (`/usr/bin/grim`) is a full
-path and matches only that file. When `/proc/<pid>/exe` can't be read, the plugin falls back to
-the process name from `/proc/<pid>/comm`. A process sets that name itself, so such a client
-never gets through `show_to`; it is only matched against `hide_from`.
+path and matches only that file. `~/` is expanded and symlinks are resolved, so
+`/run/current-system/sw/bin/grim` or `~/.nix-profile/bin/grim` match the store path the client
+runs from (checked again every second, so a NixOS switch or an update is picked up). Paths
+with spaces or commas can't be listed. When `/proc/<pid>/exe` can't be read (`hidepid`, another
+user), the plugin falls back to the process name from `/proc/<pid>/comm`. A process sets that
+name itself, so such a client never gets through `show_to` (a notification says so once per
+name); it is only matched against `hide_from`.
 
 `show_to` is a convenience, not a security boundary. Any program running as your user can
 copy grim under a listed name, or run the real one with its own code (`LD_PRELOAD`), and then
