@@ -17,9 +17,23 @@ pass() { printf '  \e[32mok\e[0m   %s\n' "$*"; }
 fail() { printf '  \e[31mFAIL\e[0m %s\n' "$*"; FAILS=$((FAILS + 1)); }
 
 magick -size 640x360 gradient:'#ff00ff-#00ffff' "$WORK/cover.png"
-cp "$(readlink -f "$(type -P grim)")" "$WORK/grim-share"
+# The grim ELF to copy. nixpkgs wraps many programs in a shell script (wrapProgram): a copy of
+# the script would run .grim-wrapped, and the capture client wouldn't be called grim-share.
+grim_elf() {
+    local p n
+    p=$(readlink -f "$(type -P grim)") || return 1
+    for n in 1 2 3; do
+        [ "$(head -c4 "$p" 2>/dev/null)" = $'\x7fELF' ] && { echo "$p"; return 0; }
+        p="$(dirname "$p")/.$(basename "$p")-wrapped"
+    done
+    echo "grim ($(type -P grim)) is not an ELF binary and no .grim-wrapped ELF was found next to it" >&2
+    return 1
+}
+GRIM_ELF=$(grim_elf) || exit 1
+cp "$GRIM_ELF" "$WORK/grim-share"
 mkdir -p "$WORK/elsewhere"
 cp "$WORK/grim-share" "$WORK/elsewhere/grim-share"
+ln -s "$WORK" "$WORK-link" # like /run/current-system/sw/bin pointing into the Nix store
 
 # Closing is slowed down (3 s) so a shot surely lands in the close animation.
 cat > "$WORK/hypr.lua" <<LUA
@@ -40,6 +54,7 @@ hl.animation({ leaf = "fadeOut", enabled = true, speed = 30, bezier = "default" 
 hl.window_rule({ match = { class = "cover-me" }, no_screen_share = true, float = true, size = "600 400" })
 hl.window_rule({ match = { class = "tabs", title = [[.*SECRET.*]] }, no_screen_share = true, no_screen_share_cover_hold = 3000 })
 hl.window_rule({ match = { class = "by-path" }, no_screen_share = true, no_screen_share_show_to = "$WORK/grim-share" })
+hl.window_rule({ match = { class = "by-link" }, no_screen_share = true, no_screen_share_show_to = "$WORK-link/grim-share" })
 LUA
 
 hctl() { hyprctl -i 0 "$@"; }
@@ -154,6 +169,11 @@ open_win by-path
 check "$WORK/grim-share" e-path "$BOX" content "the listed path sees the window"
 check "$WORK/elsewhere/grim-share" e-copy "$BOX" cover "a copy with the same name elsewhere gets the cover"
 kill "$PID"
+open_win by-link
+check "$WORK/grim-share" e-link "$BOX" content "a path through a symlink sees the window"
+check "$WORK/elsewhere/grim-share" e-link-copy "$BOX" cover "the copy elsewhere still gets the cover"
+kill "$PID"
+rm -f "$WORK-link"
 
 pkill -xu "$(id -u)" Hyprland
 echo

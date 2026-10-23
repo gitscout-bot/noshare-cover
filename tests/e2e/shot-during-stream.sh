@@ -16,7 +16,20 @@ pass() { printf '  \e[32mok\e[0m   %s\n' "$*"; }
 fail() { printf '  \e[31mFAIL\e[0m %s\n' "$*"; FAILS=$((FAILS + 1)); }
 
 magick -size 640x360 gradient:'#ff00ff-#00ffff' "$WORK/cover.png"
-cp "$(readlink -f "$(type -P grim)")" "$WORK/grim-share"
+# The grim ELF to copy. nixpkgs wraps many programs in a shell script (wrapProgram): a copy of
+# the script would run .grim-wrapped, and the capture client wouldn't be called grim-share.
+grim_elf() {
+    local p n
+    p=$(readlink -f "$(type -P grim)") || return 1
+    for n in 1 2 3; do
+        [ "$(head -c4 "$p" 2>/dev/null)" = $'\x7fELF' ] && { echo "$p"; return 0; }
+        p="$(dirname "$p")/.$(basename "$p")-wrapped"
+    done
+    echo "grim ($(type -P grim)) is not an ELF binary and no .grim-wrapped ELF was found next to it" >&2
+    return 1
+}
+GRIM_ELF=$(grim_elf) || exit 1
+cp "$GRIM_ELF" "$WORK/grim-share"
 
 cat > "$WORK/hypr.lua" <<LUA
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = "1" })
