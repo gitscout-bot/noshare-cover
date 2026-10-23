@@ -815,7 +815,10 @@ namespace {
                 if (fade && !fade->done())
                     c.box = fade->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
                 else if (fade || now >= c.bindUntil)
-                    c.holdUntil = now + holdFor(c.rules);
+                    // without a fade-out the hold starts when the search for one ends, right
+                    // after the close, not at the next frame: with single shots (nothing
+                    // renders in between) that can be seconds later
+                    c.holdUntil = (fade ? now : c.bindUntil) + holdFor(c.rules);
             }
             if (c.holdUntil && now >= *c.holdUntil)
                 continue; // the pump drops it and repaints
