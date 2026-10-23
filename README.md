@@ -108,7 +108,7 @@ The same hold applies when a window stops being hidden while it stays on screen,
 that matches the title stops matching. A browser changes the window title before it repaints,
 so when you switch away from a matching tab the old page would otherwise reach the stream for
 a frame or two; set `no_screen_share_cover_hold` (e.g. 300) on such a rule. Clients listed in
-`show_to` get no hold.
+`show_to` get neither this hold nor the cover over a closing window: they see it as it is.
 
 By default hidden windows are covered in every capture: portal streams (browsers, Discord,
 OBS via PipeWire) and clients that capture the screen directly (grim, wf-recorder,
@@ -119,6 +119,20 @@ hidden windows as they are, for example for your own screenshots. `hide_from =
 clients (here, only from portal streams) and a client that can't be identified is still
 covered. Names are separated by commas or spaces. With both lists empty the plugin never
 looks the client up.
+
+A name matches any executable with that name; an entry with a slash (`/usr/bin/grim`) is a full
+path and matches only that file. `~/` is expanded and symlinks are resolved, so
+`/run/current-system/sw/bin/grim` or `~/.nix-profile/bin/grim` match the store path the client
+runs from (checked again every second, so a NixOS switch or an update is picked up). Paths
+with spaces or commas can't be listed. When `/proc/<pid>/exe` can't be read (`hidepid`, another
+user), the plugin falls back to the process name from `/proc/<pid>/comm`. A process sets that
+name itself, so such a client never gets through `show_to` (a notification says so once per
+name); it is only matched against `hide_from`.
+
+`show_to` is a convenience, not a security boundary. Any program running as your user can
+copy grim under a listed name, or run the real one with its own code (`LD_PRELOAD`), and then
+it sees what grim sees. The plugin keeps hidden windows out of streams and recordings, not
+away from software on your machine.
 
 The same lists work per window or layer rule, and then only the rule's own lists apply to
 that surface:

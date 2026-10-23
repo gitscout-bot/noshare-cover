@@ -22,6 +22,7 @@
 #include <cstring>
 #include <deque>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <list>
@@ -552,6 +553,24 @@ namespace {
         std::chrono::steady_clock::time_point                bindUntil; // give up looking for the fade-out after this
         std::optional<std::chrono::steady_clock::time_point> holdUntil; // set once the fade-out is over
     };
+    // Who a capture client is: its executable, or only the name from /proc/<pid>/comm
+    // when the executable can't be read.
+    struct SClientId {
+        std::string path; // full path of the executable, empty for comm
+        std::string name; // basename of path, or comm (first 15 chars, the process sets it itself)
+        bool        fromComm = false;
+    };
+
+    // The client behind one capture frame, for show_to / hide_from.
+    struct SCaptureClient {
+        Screenshare::CScreenshareFrame*  frame = nullptr;
+        std::string                      globalShow, globalHide;
+        mutable std::optional<SClientId> id; // looked up only when some list applies
+
+        // whether it sees a hidden surface with these rules as it is
+        bool sees(const SRuleValues& rules) const;
+    };
+
     std::unordered_map<uintptr_t, SLastCover> g_lastCovers;
     // Surfaces kept covered for a moment after they stopped being hidden (see holdUnhidden),
     // with the rules they had while hidden. Valid only during one capture frame.
@@ -650,6 +669,10 @@ namespace {
 
     // The fade-out Hyprland created for a closed window or layer: one of the same kind
     // on the same monitor, not taken by another closing cover, nearest to where it was.
+    // The match is fuzzy: IFadeout doesn't keep its source, so this goes by plane and
+    // geometry only and can pick the fade-out of something else that closed nearby
+    // (e.g. for a layer that went invisible without layer.closed), and then the cover
+    // follows the wrong fade-out.
     SP<Desktop::IFadeout> findFadeFor(const SClosing& c, const PHLMONITOR& mon) {
         const auto& state = Desktop::fadingOutState();
         if (!state)
@@ -785,8 +808,9 @@ namespace {
         startClosing(true, reinterpret_cast<uintptr_t>(l.get()), l->m_monitor.lock(), CBox{pos, size}, ruleValuesFor(l), 0.F, 2.F);
     }
 
-    // Returns the area it drew over (capture pixels).
-    CRegion paintClosing(const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now) {
+    // Returns the area it drew over (capture pixels). Clients that may see the surface
+    // (show_to / hide_from) get no closing cover: they see its fade-out as it is.
+    CRegion paintClosing(const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now, const SCaptureClient& client) {
         CRegion drawnArea;
         for (auto& c : g_closing) {
             if (c.mon.lock() != mon)
@@ -800,10 +824,17 @@ namespace {
                 if (fade && !fade->done())
                     c.box = fade->geometricBox(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
                 else if (fade || now >= c.bindUntil)
-                    c.holdUntil = now + holdFor(c.rules);
+                    // without a fade-out the hold starts when the search for one ends, right
+                    // after the close, not at the next frame: with single shots (nothing
+                    // renders in between) that can be seconds later. A fade-out that ended
+                    // with no frame since it was found still counts from now: a late extra
+                    // cover in that rare case, never a missing one.
+                    c.holdUntil = (fade ? now : c.bindUntil) + holdFor(c.rules);
             }
             if (c.holdUntil && now >= *c.holdUntil)
                 continue; // the pump drops it and repaints
+            if (client.sees(c.rules))
+                continue;
 
             const auto box =
                 zoomed(mon, CBox{c.box.x, c.box.y, std::max(c.box.w, 5.0), std::max(c.box.h, 5.0)}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
@@ -1029,7 +1060,8 @@ namespace {
 
     // ownBoxes: Hyprland's black boxes were suppressed for this frame (see
     // suppressNoScreenShare), so everything without a cover is drawn black here.
-    void paintCovers(Screenshare::CScreenshareFrame* frame, bool ownBoxes) {
+    // revealed: hidden surfaces this client sees as they are (see revealFor).
+    void paintCovers(Screenshare::CScreenshareFrame* frame, bool ownBoxes, const SCaptureClient& client, const std::unordered_set<uintptr_t>& revealed) {
         if (!frame || !frame->m_session || !g_pHyprRenderer) {
             NSC_TRACE("skip: frame %p session %d renderer %d\n", static_cast<void*>(frame), frame && frame->m_session ? 1 : 0, g_pHyprRenderer ? 1 : 0);
             return;
@@ -1222,8 +1254,13 @@ namespace {
                 drawBlack(box);
         }
 
+        // Surfaces shown as they are to this client are still hidden and on screen: keep
+        // their entries (and the time they were last covered) for the other clients, or a
+        // screenshot between two stream frames would drop the hold of a window that stops
+        // being hidden right after it.
+        seen.insert(revealed.begin(), revealed.end());
         trackClosed(mon, seen, now);
-        CRegion coverArea = paintClosing(mon, capturePos, now);
+        CRegion coverArea = paintClosing(mon, capturePos, now, client);
 
         // Layers above windows (bars, launchers, notifications) are drawn by Hyprland on
         // top of the hidden window, and the covers went over them. Draw them again on top,
@@ -1257,10 +1294,10 @@ namespace {
         drainNotifications();
     }
 
-    // Executable name of the capture client behind this frame: the portal for
-    // PipeWire streams (browsers, Discord), or wf-recorder, grim, obs (wlrobs)...
-    // when they capture directly. Empty if it can't be found out.
-    std::string captureClientExe(Screenshare::CScreenshareFrame* frame) {
+    // Capture client behind this frame: the portal for PipeWire streams (browsers,
+    // Discord), or wf-recorder, grim, obs (wlrobs)... when they capture directly.
+    // Empty name if it can't be found out.
+    SClientId captureClient(Screenshare::CScreenshareFrame* frame) {
         // the session is owned by a unique pointer in the manager: its weak pointer can't be
         // lock()ed (hyprutils asserts), only checked and read
         if (!frame || frame->m_session.expired())
@@ -1280,26 +1317,53 @@ namespace {
             // exe needs ptrace read access, which some setups deny; comm is always
             // readable (first 15 chars of the executable name)
             NSC_TRACE("capture client pid %d: /proc/pid/exe: %s, falling back to comm\n", (int)pid, std::strerror(errno));
-            std::string comm;
+            SClientId id{.fromComm = true};
             if (FILE* f = std::fopen(std::format("/proc/{}/comm", pid).c_str(), "r")) {
                 if (std::fgets(buf, sizeof(buf), f))
-                    comm = buf;
+                    id.name = buf;
                 std::fclose(f);
             }
-            while (!comm.empty() && (comm.back() == '\n' || comm.back() == '\r'))
-                comm.pop_back();
-            return comm;
+            while (!id.name.empty() && (id.name.back() == '\n' || id.name.back() == '\r'))
+                id.name.pop_back();
+            return id;
         }
-        std::string exe(buf, n);
-        if (exe.ends_with(" (deleted)")) // the binary was updated while running
-            exe.resize(exe.size() - 10);
-        const auto slash = exe.rfind('/');
-        return slash == std::string::npos ? exe : exe.substr(slash + 1);
+        SClientId id{.path = std::string(buf, n)};
+        if (id.path.ends_with(" (deleted)")) // the binary was updated while running
+            id.path.resize(id.path.size() - 10);
+        const auto slash = id.path.rfind('/');
+        id.name          = slash == std::string::npos ? id.path : id.path.substr(slash + 1);
+        return id;
     }
 
-    // "grim, obs  wf-recorder" -> contains(exe)
-    bool listHas(const std::string& list, const std::string& exe) {
-        if (exe.empty())
+    // A full-path entry with ~ expanded and symlinks resolved, the way /proc/<pid>/exe
+    // shows it (/run/current-system/sw/bin/grim -> /nix/store/<hash>-grim/bin/grim).
+    // Resolved again after a second, not on every frame: a NixOS switch or a package
+    // update moves the target while the config stays the same.
+    struct SResolvedPath {
+        std::string                           path;
+        std::chrono::steady_clock::time_point at;
+    };
+    std::unordered_map<std::string, SResolvedPath> g_resolvedPaths;
+
+    const std::string& resolvedPath(std::string_view entry) {
+        const auto now       = std::chrono::steady_clock::now();
+        auto [it, inserted] = g_resolvedPaths.try_emplace(std::string(entry));
+        if (inserted || now - it->second.at >= std::chrono::seconds(1)) {
+            std::string raw(entry);
+            if (raw.starts_with("~/"))
+                if (const char* home = std::getenv("HOME"))
+                    raw = home + raw.substr(1);
+            std::error_code ec;
+            const auto      canon = std::filesystem::weakly_canonical(raw, ec);
+            it->second            = {ec ? raw : canon.string(), now};
+        }
+        return it->second.path;
+    }
+
+    // "grim, /usr/bin/obs  wf-recorder" -> contains(id). An entry with a slash is a full
+    // path and matches only that executable, so a copy elsewhere doesn't pass.
+    bool listHas(const std::string& list, const SClientId& id) {
+        if (id.name.empty())
             return false;
         size_t i = 0;
         while (i < list.size()) {
@@ -1308,10 +1372,14 @@ namespace {
                 break;
             const auto end   = list.find_first_of(", \t", start);
             const auto entry = std::string_view(list).substr(start, end == std::string::npos ? std::string::npos : end - start);
-            if (entry == exe)
-                return true;
-            // a name from /proc/pid/comm is cut to 15 chars (xdg-desktop-portal-hyprland -> xdg-desktop-por)
-            if (exe.size() == 15 && entry.size() > 15 && entry.starts_with(exe))
+            if (id.fromComm) {
+                // show_to never lets a comm name through (see sees), so for hide_from a
+                // match only hides more: compare with the entry's file name, cut to 15
+                // chars like comm (xdg-desktop-portal-hyprland -> xdg-desktop-por)
+                const auto file = entry.substr(entry.rfind('/') + 1);
+                if (file == id.name || (id.name.size() == 15 && file.size() > 15 && file.starts_with(id.name)))
+                    return true;
+            } else if (entry.contains('/') ? resolvedPath(entry) == id.path : entry == id.name)
                 return true;
             i = end;
         }
@@ -1326,39 +1394,47 @@ namespace {
         return cfg ? cfg->value() : std::string{};
     }
 
+    // comm names already told about (see sees)
+    std::unordered_set<std::string> g_commWarned;
+
     // Hidden windows are hidden from every capture by default. show_to lets chosen
     // clients see them (own screenshots); hide_from, if set, hides only from its list
     // (a client that can't be identified is still covered). A window or layer rule with
     // its own no_screen_share_show_to / no_screen_share_hide_from uses only those.
     //
+    // A name from comm is set by the process itself, so it never passes show_to (that
+    // client counts as unknown); for hide_from it's enough to hide from it.
+    bool SCaptureClient::sees(const SRuleValues& rules) const {
+        const bool        ruleLists = rules.showTo || rules.hideFrom;
+        const std::string show      = ruleLists ? rules.showTo.value_or("") : globalShow;
+        const std::string hide      = ruleLists ? rules.hideFrom.value_or("") : globalHide;
+        if (!hasEntries(show) && !hasEntries(hide))
+            return false;
+        if (!id) {
+            id = captureClient(frame);
+            NSC_TRACE("capture client: %s%s\n", id->name.empty() ? "(unknown)" : id->name.c_str(), id->fromComm ? " (comm)" : "");
+        }
+        if (hasEntries(hide))
+            return !id->name.empty() && !listHas(hide, *id);
+        if (id->fromComm) {
+            // it would have been let through by its name: say once why it isn't
+            if (listHas(show, *id) && g_commWarned.insert(id->name).second)
+                notify(std::format("noshare-cover: capture client \"{}\" is known only by its process name "
+                                   "(its /proc/<pid>/exe can't be read), show_to doesn't apply to it",
+                                   id->name),
+                       10000);
+            return false;
+        }
+        return listHas(show, *id);
+    }
+
     // The surfaces this client may see get no_screen_share switched off for the cover
     // pass as well, so paintCovers treats them as normal windows: no cover, occlusion
     // and redraws as for any other window.
-    std::vector<SSuppressed> revealFor(Screenshare::CScreenshareFrame* frame, std::unordered_set<uintptr_t>& keys) {
-        std::vector<SSuppressed>   out;
-        const auto                 globalShow = cfgString(g_cfgShowTo);
-        const auto                 globalHide = cfgString(g_cfgHideFrom);
-        const bool                 anyGlobal  = hasEntries(globalShow) || hasEntries(globalHide);
-        std::optional<std::string> exe; // looked up only when some list applies
-        const auto                 client = [&]() -> const std::string& {
-            if (!exe) {
-                exe = captureClientExe(frame);
-                NSC_TRACE("capture client: %s\n", exe->empty() ? "(unknown)" : exe->c_str());
-            }
-            return *exe;
-        };
-        const auto consider = [&](uintptr_t key, Desktop::Types::COverridableVar<bool>& var, const SRuleValues& rules) {
-            const bool        ruleLists = rules.showTo || rules.hideFrom;
-            if (!ruleLists && !anyGlobal)
-                return;
-            const std::string show = ruleLists ? rules.showTo.value_or("") : globalShow;
-            const std::string hide = ruleLists ? rules.hideFrom.value_or("") : globalHide;
-            bool              reveal = false;
-            if (hasEntries(hide))
-                reveal = !client().empty() && !listHas(hide, client());
-            else if (hasEntries(show))
-                reveal = listHas(show, client());
-            if (!reveal)
+    std::vector<SSuppressed> revealFor(const SCaptureClient& client, std::unordered_set<uintptr_t>& keys) {
+        std::vector<SSuppressed> out;
+        const auto               consider = [&](uintptr_t key, Desktop::Types::COverridableVar<bool>& var, const SRuleValues& rules) {
+            if (!client.sees(rules))
                 return;
             std::optional<bool> prev;
             if (var.hasValue() && var.getPriority() == Desktop::Types::PRIORITY_SET_PROP)
@@ -1382,15 +1458,15 @@ namespace {
     // the same close_hold / no_screen_share_cover_hold as a closing one: a browser changes
     // the window title before it repaints, so with a rule that matches the title the old
     // page would reach the stream for a frame or two when you switch away. Surfaces this
-    // client may see (show_to / hide_from) are not held.
-    std::vector<SSuppressed> holdUnhidden(const std::unordered_set<uintptr_t>& revealed) {
+    // client may see (show_to / hide_from) are not held, with the rules they had while hidden.
+    std::vector<SSuppressed> holdUnhidden(const std::unordered_set<uintptr_t>& revealed, const SCaptureClient& client) {
         std::vector<SSuppressed> out;
         const auto               now  = std::chrono::steady_clock::now();
         const auto               keep = [&](uintptr_t key, Desktop::Types::COverridableVar<bool>& var) {
             if (var.valueOrDefault() || revealed.contains(key))
                 return;
             const auto it = g_lastCovers.find(key);
-            if (it == g_lastCovers.end() || now - it->second.at >= holdFor(it->second.rules))
+            if (it == g_lastCovers.end() || now - it->second.at >= holdFor(it->second.rules) || client.sees(it->second.rules))
                 return;
             std::optional<bool> prev;
             if (var.hasValue() && var.getPriority() == Desktop::Types::PRIORITY_SET_PROP)
@@ -1428,8 +1504,9 @@ namespace {
         }
         restoreNoScreenShare(suppressed);
         std::unordered_set<uintptr_t> revealedKeys;
-        const auto                    revealed = revealFor(self, revealedKeys);
-        const auto                    held     = holdUnhidden(revealedKeys);
+        const SCaptureClient          client{.frame = self, .globalShow = cfgString(g_cfgShowTo), .globalHide = cfgString(g_cfgHideFrom)};
+        const auto                    revealed = revealFor(client, revealedKeys);
+        const auto                    held     = holdUnhidden(revealedKeys, client);
         const auto                    restore  = [&] {
             restoreNoScreenShare(held);
             restoreNoScreenShare(revealed);
@@ -1437,7 +1514,7 @@ namespace {
             g_heldRules.clear();
         };
         try {
-            paintCovers(self, true);
+            paintCovers(self, true, client, revealedKeys);
         } catch (...) {
             restore();
             throw;
@@ -1604,9 +1681,9 @@ namespace {
         g_cfgCloseHold = makeValue<Config::Values::CIntValue>("plugin:no_screen_share_cover:close_hold", "Keep the cover this many ms after a closed window's animation ends",
                                                               Config::INTEGER{0});
         g_cfgShowTo   = makeValue<Config::Values::CStringValue>("plugin:no_screen_share_cover:show_to",
-                                                                "Capture clients (exe names) that see hidden windows as they are, e.g. \"grim, obs\"", Config::STRING{});
+                                                                "Capture clients (executable names or full paths) that see hidden windows as they are, e.g. \"grim, /usr/bin/obs\"", Config::STRING{});
         g_cfgHideFrom = makeValue<Config::Values::CStringValue>("plugin:no_screen_share_cover:hide_from",
-                                                                "If set, hide only from these capture clients (exe names); everyone else sees everything", Config::STRING{});
+                                                                "If set, hide only from these capture clients (executable names or full paths); everyone else sees everything", Config::STRING{});
 
         void* target = nullptr;
         for (const auto& match : HyprlandAPI::findFunctionsByName(handle, "renderMonitor")) {
