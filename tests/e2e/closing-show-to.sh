@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Closing covers and show_to: an allowed client (a copy of grim named grim-share) never
-# gets the cover of a hidden window that closed, while a client that isn't allowed (plain
-# grim, single shots, no stream) still gets it during the close animation.
+# show_to and the covers that outlive a hidden window: closing covers and the hold after a
+# window stops being hidden. An allowed client (a copy of grim named grim-share) never gets
+# them, everyone else still does, and an allowed client's shot doesn't cost the others the
+# hold. Plain grim is the client that isn't allowed.
 #
 #   tests/e2e/closing-show-to.sh <libnoshare-cover.so>
 #
-# Requires: Hyprland, grim, foot, jq, imagemagick; a seat.
+# Requires: Hyprland, grim, wf-recorder, foot, jq, imagemagick; a seat.
 set -uo pipefail
 
 PLUGIN=$(realpath "${1:?path to libnoshare-cover.so}")
@@ -17,34 +18,61 @@ fail() { printf '  \e[31mFAIL\e[0m %s\n' "$*"; FAILS=$((FAILS + 1)); }
 
 magick -size 640x360 gradient:'#ff00ff-#00ffff' "$WORK/cover.png"
 cp "$(readlink -f "$(type -P grim)")" "$WORK/grim-share"
+mkdir -p "$WORK/elsewhere"
+cp "$WORK/grim-share" "$WORK/elsewhere/grim-share"
 
-# animations on: a closed window fades out, and that fade-out is what the closing cover hides
+# Closing is slowed down (3 s) so a shot surely lands in the close animation.
 cat > "$WORK/hypr.lua" <<LUA
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = "1" })
 hl.plugin.load("$PLUGIN")
 hl.config({
-    plugin = { no_screen_share_cover = { path_cover = "$WORK/cover.png", show_to = "grim-share", close_hold = 300 } },
+    plugin = { no_screen_share_cover = { path_cover = "$WORK/cover.png", show_to = "grim-share" } },
     general = { gaps_in = 0, gaps_out = 0, border_size = 0, layout = "dwindle" },
     decoration = { rounding = 0, shadow = { enabled = false }, blur = { enabled = false } },
     animations = { enabled = true },
     misc = { disable_hyprland_logo = true, disable_splash_rendering = true },
     debug = { suppress_errors = true },
 })
+hl.animation({ leaf = "windowsIn", enabled = false })
+hl.animation({ leaf = "fadeIn", enabled = false })
+hl.animation({ leaf = "windowsOut", enabled = true, speed = 30, bezier = "default", style = "popin 50%" })
+hl.animation({ leaf = "fadeOut", enabled = true, speed = 30, bezier = "default" })
 hl.window_rule({ match = { class = "cover-me" }, no_screen_share = true, float = true, size = "600 400" })
+hl.window_rule({ match = { class = "tabs", title = [[.*SECRET.*]] }, no_screen_share = true, no_screen_share_cover_hold = 3000 })
+hl.window_rule({ match = { class = "by-path" }, no_screen_share = true, no_screen_share_show_to = "$WORK/grim-share" })
 LUA
 
 hctl() { hyprctl -i 0 "$@"; }
 win_box() { hctl clients -j | jq -r --arg c "$1" '.[] | select(.class == $c) | "\(.size[0])x\(.size[1])+\(.at[0])+\(.at[1])"' | head -1; }
-mean_rgb() { magick "$1" -crop "$2" -resize 1x1\! -format '%[fx:int(255*r)] %[fx:int(255*g)] %[fx:int(255*b)]' info:; }
+mean_rgb() { magick "$WORK/$1.png" -crop "$2" -resize 1x1\! -format '%[fx:int(255*r)] %[fx:int(255*g)] %[fx:int(255*b)]' info:; }
 is_cover() { read -r r g b <<<"$1"; [ "$r" -gt 100 ] && [ "$b" -gt 200 ]; }
-# foot window, waits until it's mapped; sets FOOT, W H X Y and CENTER (40x40 in the middle)
-open_window() {
-    foot --app-id cover-me sh -c 'while :; do date; sleep 0.2; done' >/dev/null 2>&1 &
-    FOOT=$!
-    for _ in $(seq 40); do sleep 0.25; [ -n "$(win_box cover-me)" ] && break; done
+title() { hctl clients -j | jq -r '.[] | select(.class == "tabs") | .title' | head -1; }
+# 40x40 in the middle of a "WxH+X+Y" box: a closing window shrinks towards its middle
+center() { local w h x y; read -r w h x y <<<"$(sed 's/[x+]/ /g' <<<"$1")"; echo "40x40+$((x + w / 2 - 20))+$((y + h / 2 - 20))"; }
+# $1: client (grim or a path), $2: shot name, $3: box, $4: cover|content expected, $5: label
+check() {
+    local name=$2 c
+    "$1" "$WORK/$name.png"
+    c=$(mean_rgb "$name" "$(center "$3")")
+    if [ "$4" = cover ]; then
+        is_cover "$c" && pass "$5 ($c)" || fail "$5: expected the cover ($c)"
+    else
+        is_cover "$c" && fail "$5: expected the window, got the cover ($c)" || pass "$5 ($c)"
+    fi
+}
+open_win() { # $1: class; sets PID and BOX
+    foot --app-id "$1" sh -c 'while :; do date; sleep 0.2; done' >/dev/null 2>&1 &
+    PID=$!
+    for _ in $(seq 40); do sleep 0.25; [ -n "$(win_box "$1")" ] && break; done
     sleep 1
-    read -r W H X Y <<<"$(sed 's/[x+]/ /g' <<<"$(win_box cover-me)")"
-    CENTER="40x40+$((X + W / 2 - 20))+$((Y + H / 2 - 20))"
+    BOX=$(win_box "$1")
+}
+close_win() { # $1: class; returns once Hyprland has unmapped it (its fade-out runs)
+    kill "$PID"
+    for _ in $(seq 100); do [ -z "$(win_box "$1")" ] && break; sleep 0.01; done
+}
+settle() { # let a closing cover expire and the fade-out finish before the next case
+    sleep 4
 }
 
 pkill -xu "$(id -u)" Hyprland; sleep 0.5
@@ -53,34 +81,79 @@ for _ in $(seq 60); do sleep 0.25; hctl version >/dev/null 2>&1 && break; done
 export WAYLAND_DISPLAY=$(ls "$XDG_RUNTIME_DIR" | grep -m1 '^wayland-[0-9]*$')
 sleep 2
 
-echo "== allowed client after a hidden window closed"
-for i in 1 2 3; do
-    open_window
-    "$WORK/grim-share" "$WORK/a$i-before.png"
-    kill "$FOOT"
-    sleep 1   # fade-out over, still inside close_hold if the hold started late
-    "$WORK/grim-share" "$WORK/a$i-after.png"
-    C=$(mean_rgb "$WORK/a$i-before.png" "$CENTER")
-    is_cover "$C" && fail "run $i: grim-share got the cover of the open window ($C)" || pass "run $i: grim-share sees the open window ($C)"
-    C=$(mean_rgb "$WORK/a$i-after.png" "$CENTER")
-    is_cover "$C" && fail "run $i: grim-share got the cover of the closed window ($C)" || pass "run $i: grim-share has no closing cover ($C)"
-    sleep 1
+# The screencopy session counts as sharing for a moment after grim exits, so a close 0.5 s
+# after the shot still goes through the close event; 3 s after, nothing is shared any more and
+# only the entry from the last shot can bring the cover. This runs first: after a stream the
+# output counts as shared for longer.
+echo "== closing cover without a stream: grim keeps the cover"
+for wait in 0.5 3; do
+    for i in 1 2 3; do
+        open_win cover-me
+        check grim "b$wait-$i-open" "$BOX" cover "close after $wait s, run $i: grim while open"
+        sleep "$wait"
+        close_win cover-me
+        sleep 0.1
+        check grim "b$wait-$i-fade" "$BOX" cover "close after $wait s, run $i: grim during the close"
+        settle
+    done
 done
 
-echo "== client not in show_to during the close animation, no stream"
+echo "== closing cover during a stream (wf-recorder): grim-share sees the fade-out"
 for i in 1 2 3; do
-    open_window
-    grim "$WORK/b$i-before.png"
-    sleep 0.5
-    kill "$FOOT"
-    sleep 0.05
-    grim "$WORK/b$i-fade.png"
-    C=$(mean_rgb "$WORK/b$i-before.png" "$CENTER")
-    is_cover "$C" && pass "run $i: grim gets the cover ($C)" || fail "run $i: grim sees the open window ($C)"
-    C=$(mean_rgb "$WORK/b$i-fade.png" "$CENTER")
-    is_cover "$C" && pass "run $i: grim gets the cover during the fade-out ($C)" || fail "run $i: the closing window reached grim ($C)"
-    sleep 1
+    open_win cover-me
+    wf-recorder -f "$WORK/a$i.mkv" -c libx264 -r 10 >/dev/null 2>&1 &
+    REC=$!
+    sleep 1.5
+    close_win cover-me
+    sleep 0.2
+    check "$WORK/grim-share" "a$i-share" "$BOX" content "run $i: grim-share during the close"
+    check grim "a$i-grim" "$BOX" cover "run $i: grim during the close"
+    kill -INT "$REC"; wait "$REC" 2>/dev/null
+    sleep 0.6 # Hyprland 0.56.2 can crash on exit right after a screencast stops
+    settle
 done
+
+# a foot window titled "SECRET page" until $WORK/switch-N appears, then "normal page"
+open_tab() { # $1: N; sets BOX
+    rm -f "$WORK/switch-$1"
+    foot --app-id tabs sh -c "printf '\033]2;SECRET page\007'; while [ ! -f $WORK/switch-$1 ]; do sleep 0.02; done; printf '\033]2;normal page\007'; while :; do date; sleep 0.2; done" >/dev/null 2>&1 &
+    for _ in $(seq 40); do sleep 0.25; [ "$(title)" = "SECRET page" ] && break; done
+    sleep 0.5
+    BOX=$(win_box tabs)
+}
+switch_tab() { # $1: N
+    touch "$WORK/switch-$1"
+    for _ in $(seq 50); do [ "$(title)" = "normal page" ] && break; sleep 0.01; done
+}
+close_tab() { # $1: N
+    pkill -f "switch-$1" 2>/dev/null
+    for _ in $(seq 20); do [ -z "$(win_box tabs)" ] && break; sleep 0.1; done
+    settle
+}
+
+echo "== hold after the title stops matching (no_screen_share_cover_hold = 3000)"
+N=0
+for i in 1 2 3; do
+    N=$((N + 1)); open_tab "$N"
+    check grim "c$i-hidden" "$BOX" cover "run $i: grim while the title matches"
+    check "$WORK/grim-share" "c$i-share" "$BOX" content "run $i: grim-share while the title matches"
+    switch_tab "$N"
+    check grim "c$i-held" "$BOX" cover "run $i: grim right after the switch, a grim-share shot in between"
+    close_tab "$N"
+done
+for i in 1 2 3; do
+    N=$((N + 1)); open_tab "$N"
+    check grim "d$i-hidden" "$BOX" cover "run $i: grim while the title matches"
+    switch_tab "$N"
+    check "$WORK/grim-share" "d$i-share" "$BOX" content "run $i: grim-share right after the switch gets no hold"
+    close_tab "$N"
+done
+
+echo "== show_to with a full path"
+open_win by-path
+check "$WORK/grim-share" e-path "$BOX" content "the listed path sees the window"
+check "$WORK/elsewhere/grim-share" e-copy "$BOX" cover "a copy with the same name elsewhere gets the cover"
+kill "$PID"
 
 pkill -xu "$(id -u)" Hyprland
 echo
