@@ -1046,7 +1046,8 @@ namespace {
 
     // ownBoxes: Hyprland's black boxes were suppressed for this frame (see
     // suppressNoScreenShare), so everything without a cover is drawn black here.
-    void paintCovers(Screenshare::CScreenshareFrame* frame, bool ownBoxes, const SCaptureClient& client) {
+    // revealed: hidden surfaces this client sees as they are (see revealFor).
+    void paintCovers(Screenshare::CScreenshareFrame* frame, bool ownBoxes, const SCaptureClient& client, const std::unordered_set<uintptr_t>& revealed) {
         if (!frame || !frame->m_session || !g_pHyprRenderer) {
             NSC_TRACE("skip: frame %p session %d renderer %d\n", static_cast<void*>(frame), frame && frame->m_session ? 1 : 0, g_pHyprRenderer ? 1 : 0);
             return;
@@ -1239,6 +1240,11 @@ namespace {
                 drawBlack(box);
         }
 
+        // Surfaces shown as they are to this client are still hidden and on screen: keep
+        // their entries (and the time they were last covered) for the other clients, or a
+        // screenshot between two stream frames would drop the hold of a window that stops
+        // being hidden right after it.
+        seen.insert(revealed.begin(), revealed.end());
         trackClosed(mon, seen, now);
         CRegion coverArea = paintClosing(mon, capturePos, now, client);
 
@@ -1448,7 +1454,7 @@ namespace {
             g_heldRules.clear();
         };
         try {
-            paintCovers(self, true, client);
+            paintCovers(self, true, client, revealedKeys);
         } catch (...) {
             restore();
             throw;
