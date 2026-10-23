@@ -552,11 +552,19 @@ namespace {
         std::chrono::steady_clock::time_point                bindUntil; // give up looking for the fade-out after this
         std::optional<std::chrono::steady_clock::time_point> holdUntil; // set once the fade-out is over
     };
+    // Who a capture client is: its executable, or only the name from /proc/<pid>/comm
+    // when the executable can't be read.
+    struct SClientId {
+        std::string path; // full path of the executable, empty for comm
+        std::string name; // basename of path, or comm (first 15 chars, the process sets it itself)
+        bool        fromComm = false;
+    };
+
     // The client behind one capture frame, for show_to / hide_from.
     struct SCaptureClient {
-        Screenshare::CScreenshareFrame*    frame = nullptr;
-        std::string                        globalShow, globalHide;
-        mutable std::optional<std::string> exe; // looked up only when some list applies
+        Screenshare::CScreenshareFrame*  frame = nullptr;
+        std::string                      globalShow, globalHide;
+        mutable std::optional<SClientId> id; // looked up only when some list applies
 
         // whether it sees a hidden surface with these rules as it is
         bool sees(const SRuleValues& rules) const;
@@ -1283,10 +1291,10 @@ namespace {
         drainNotifications();
     }
 
-    // Executable name of the capture client behind this frame: the portal for
-    // PipeWire streams (browsers, Discord), or wf-recorder, grim, obs (wlrobs)...
-    // when they capture directly. Empty if it can't be found out.
-    std::string captureClientExe(Screenshare::CScreenshareFrame* frame) {
+    // Capture client behind this frame: the portal for PipeWire streams (browsers,
+    // Discord), or wf-recorder, grim, obs (wlrobs)... when they capture directly.
+    // Empty name if it can't be found out.
+    SClientId captureClient(Screenshare::CScreenshareFrame* frame) {
         // the session is owned by a unique pointer in the manager: its weak pointer can't be
         // lock()ed (hyprutils asserts), only checked and read
         if (!frame || frame->m_session.expired())
@@ -1306,26 +1314,28 @@ namespace {
             // exe needs ptrace read access, which some setups deny; comm is always
             // readable (first 15 chars of the executable name)
             NSC_TRACE("capture client pid %d: /proc/pid/exe: %s, falling back to comm\n", (int)pid, std::strerror(errno));
-            std::string comm;
+            SClientId id{.fromComm = true};
             if (FILE* f = std::fopen(std::format("/proc/{}/comm", pid).c_str(), "r")) {
                 if (std::fgets(buf, sizeof(buf), f))
-                    comm = buf;
+                    id.name = buf;
                 std::fclose(f);
             }
-            while (!comm.empty() && (comm.back() == '\n' || comm.back() == '\r'))
-                comm.pop_back();
-            return comm;
+            while (!id.name.empty() && (id.name.back() == '\n' || id.name.back() == '\r'))
+                id.name.pop_back();
+            return id;
         }
-        std::string exe(buf, n);
-        if (exe.ends_with(" (deleted)")) // the binary was updated while running
-            exe.resize(exe.size() - 10);
-        const auto slash = exe.rfind('/');
-        return slash == std::string::npos ? exe : exe.substr(slash + 1);
+        SClientId id{.path = std::string(buf, n)};
+        if (id.path.ends_with(" (deleted)")) // the binary was updated while running
+            id.path.resize(id.path.size() - 10);
+        const auto slash = id.path.rfind('/');
+        id.name          = slash == std::string::npos ? id.path : id.path.substr(slash + 1);
+        return id;
     }
 
-    // "grim, obs  wf-recorder" -> contains(exe)
-    bool listHas(const std::string& list, const std::string& exe) {
-        if (exe.empty())
+    // "grim, /usr/bin/obs  wf-recorder" -> contains(id). An entry with a slash is a full
+    // path and matches only that executable, so a copy elsewhere doesn't pass.
+    bool listHas(const std::string& list, const SClientId& id) {
+        if (id.name.empty())
             return false;
         size_t i = 0;
         while (i < list.size()) {
@@ -1334,10 +1344,14 @@ namespace {
                 break;
             const auto end   = list.find_first_of(", \t", start);
             const auto entry = std::string_view(list).substr(start, end == std::string::npos ? std::string::npos : end - start);
-            if (entry == exe)
-                return true;
-            // a name from /proc/pid/comm is cut to 15 chars (xdg-desktop-portal-hyprland -> xdg-desktop-por)
-            if (exe.size() == 15 && entry.size() > 15 && entry.starts_with(exe))
+            if (id.fromComm) {
+                // only hide_from gets here (show_to never lets a comm name through, see
+                // sees), so a match only hides more: compare with the entry's file name,
+                // cut to 15 chars like comm (xdg-desktop-portal-hyprland -> xdg-desktop-por)
+                const auto file = entry.substr(entry.rfind('/') + 1);
+                if (file == id.name || (id.name.size() == 15 && file.size() > 15 && file.starts_with(id.name)))
+                    return true;
+            } else if (entry.contains('/') ? entry == id.path : entry == id.name)
                 return true;
             i = end;
         }
@@ -1356,19 +1370,22 @@ namespace {
     // clients see them (own screenshots); hide_from, if set, hides only from its list
     // (a client that can't be identified is still covered). A window or layer rule with
     // its own no_screen_share_show_to / no_screen_share_hide_from uses only those.
+    //
+    // A name from comm is set by the process itself, so it never passes show_to (that
+    // client counts as unknown); for hide_from it's enough to hide from it.
     bool SCaptureClient::sees(const SRuleValues& rules) const {
         const bool        ruleLists = rules.showTo || rules.hideFrom;
         const std::string show      = ruleLists ? rules.showTo.value_or("") : globalShow;
         const std::string hide      = ruleLists ? rules.hideFrom.value_or("") : globalHide;
         if (!hasEntries(show) && !hasEntries(hide))
             return false;
-        if (!exe) {
-            exe = captureClientExe(frame);
-            NSC_TRACE("capture client: %s\n", exe->empty() ? "(unknown)" : exe->c_str());
+        if (!id) {
+            id = captureClient(frame);
+            NSC_TRACE("capture client: %s%s\n", id->name.empty() ? "(unknown)" : id->name.c_str(), id->fromComm ? " (comm)" : "");
         }
         if (hasEntries(hide))
-            return !exe->empty() && !listHas(hide, *exe);
-        return listHas(show, *exe);
+            return !id->name.empty() && !listHas(hide, *id);
+        return !id->fromComm && listHas(show, *id);
     }
 
     // The surfaces this client may see get no_screen_share switched off for the cover
@@ -1624,9 +1641,9 @@ namespace {
         g_cfgCloseHold = makeValue<Config::Values::CIntValue>("plugin:no_screen_share_cover:close_hold", "Keep the cover this many ms after a closed window's animation ends",
                                                               Config::INTEGER{0});
         g_cfgShowTo   = makeValue<Config::Values::CStringValue>("plugin:no_screen_share_cover:show_to",
-                                                                "Capture clients (exe names) that see hidden windows as they are, e.g. \"grim, obs\"", Config::STRING{});
+                                                                "Capture clients (executable names or full paths) that see hidden windows as they are, e.g. \"grim, /usr/bin/obs\"", Config::STRING{});
         g_cfgHideFrom = makeValue<Config::Values::CStringValue>("plugin:no_screen_share_cover:hide_from",
-                                                                "If set, hide only from these capture clients (exe names); everyone else sees everything", Config::STRING{});
+                                                                "If set, hide only from these capture clients (executable names or full paths); everyone else sees everything", Config::STRING{});
 
         void* target = nullptr;
         for (const auto& match : HyprlandAPI::findFunctionsByName(handle, "renderMonitor")) {

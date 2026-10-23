@@ -120,6 +120,16 @@ clients (here, only from portal streams) and a client that can't be identified i
 covered. Names are separated by commas or spaces. With both lists empty the plugin never
 looks the client up.
 
+A name matches any executable with that name; an entry with a slash (`/usr/bin/grim`) is a full
+path and matches only that file. When `/proc/<pid>/exe` can't be read, the plugin falls back to
+the process name from `/proc/<pid>/comm`. A process sets that name itself, so such a client
+never gets through `show_to`; it is only matched against `hide_from`.
+
+`show_to` is a convenience, not a security boundary. Any program running as your user can
+copy grim under a listed name, or run the real one with its own code (`LD_PRELOAD`), and then
+it sees what grim sees. The plugin keeps hidden windows out of streams and recordings, not
+away from software on your machine.
+
 The same lists work per window or layer rule, and then only the rule's own lists apply to
 that surface:
 
