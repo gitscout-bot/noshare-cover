@@ -552,6 +552,10 @@ namespace {
         std::chrono::steady_clock::time_point                bindUntil; // give up looking for the fade-out after this
         std::optional<std::chrono::steady_clock::time_point> holdUntil; // set once the fade-out is over
     };
+    // show_to / hide_from of one capture frame: whether its client sees a hidden surface
+    // with these rules as it is (see seesFor)
+    using SeesFn = std::function<bool(const SRuleValues&)>;
+
     std::unordered_map<uintptr_t, SLastCover> g_lastCovers;
     // Surfaces kept covered for a moment after they stopped being hidden (see holdUnhidden),
     // with the rules they had while hidden. Valid only during one capture frame.
@@ -725,10 +729,14 @@ namespace {
     // closing cover here doesn't depend on the stream sending frames (a static screen
     // sends none, and the frame-based tracking above then only has old data).
     void startClosing(bool isLayer, uintptr_t key, const PHLMONITOR& mon, const CBox& box, SRuleValues&& rules, float rounding, float roundingPower) {
+        // Forget it even when nothing is being shared: an entry left behind would be taken
+        // for something closed just now by the next capture of this monitor, and matched
+        // to whatever fade-out runs then (slurp's selection layer before a screenshot).
+        // While sharing, this also keeps the next frame from starting it a second time.
+        g_lastCovers.erase(key);
         const auto& mgr = Screenshare::mgr();
         if (!mon || !mgr || !mgr->isOutputBeingSSd(mon))
             return;
-        g_lastCovers.erase(key); // don't start it a second time from the next frame
         g_closing.push_back(SClosing{
             .isLayer       = isLayer,
             .mon           = mon,
@@ -785,8 +793,9 @@ namespace {
         startClosing(true, reinterpret_cast<uintptr_t>(l.get()), l->m_monitor.lock(), CBox{pos, size}, ruleValuesFor(l), 0.F, 2.F);
     }
 
-    // Returns the area it drew over (capture pixels).
-    CRegion paintClosing(const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now) {
+    // Returns the area it drew over (capture pixels). Clients that may see the surface
+    // (show_to / hide_from) get no closing cover: they see its fade-out as it is.
+    CRegion paintClosing(const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now, const SeesFn& sees) {
         CRegion drawnArea;
         for (auto& c : g_closing) {
             if (c.mon.lock() != mon)
@@ -804,6 +813,8 @@ namespace {
             }
             if (c.holdUntil && now >= *c.holdUntil)
                 continue; // the pump drops it and repaints
+            if (sees(c.rules))
+                continue;
 
             const auto box =
                 zoomed(mon, CBox{c.box.x, c.box.y, std::max(c.box.w, 5.0), std::max(c.box.h, 5.0)}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
@@ -1029,7 +1040,7 @@ namespace {
 
     // ownBoxes: Hyprland's black boxes were suppressed for this frame (see
     // suppressNoScreenShare), so everything without a cover is drawn black here.
-    void paintCovers(Screenshare::CScreenshareFrame* frame, bool ownBoxes) {
+    void paintCovers(Screenshare::CScreenshareFrame* frame, bool ownBoxes, const SeesFn& sees) {
         if (!frame || !frame->m_session || !g_pHyprRenderer) {
             NSC_TRACE("skip: frame %p session %d renderer %d\n", static_cast<void*>(frame), frame && frame->m_session ? 1 : 0, g_pHyprRenderer ? 1 : 0);
             return;
@@ -1223,7 +1234,7 @@ namespace {
         }
 
         trackClosed(mon, seen, now);
-        CRegion coverArea = paintClosing(mon, capturePos, now);
+        CRegion coverArea = paintClosing(mon, capturePos, now, sees);
 
         // Layers above windows (bars, launchers, notifications) are drawn by Hyprland on
         // top of the hidden window, and the covers went over them. Draw them again on top,
@@ -1330,35 +1341,32 @@ namespace {
     // clients see them (own screenshots); hide_from, if set, hides only from its list
     // (a client that can't be identified is still covered). A window or layer rule with
     // its own no_screen_share_show_to / no_screen_share_hide_from uses only those.
-    //
+    SeesFn seesFor(Screenshare::CScreenshareFrame* frame) {
+        auto exe = std::make_shared<std::optional<std::string>>(); // looked up only when some list applies
+        return [frame, exe, globalShow = cfgString(g_cfgShowTo), globalHide = cfgString(g_cfgHideFrom)](const SRuleValues& rules) {
+            const bool        ruleLists = rules.showTo || rules.hideFrom;
+            const std::string show      = ruleLists ? rules.showTo.value_or("") : globalShow;
+            const std::string hide      = ruleLists ? rules.hideFrom.value_or("") : globalHide;
+            if (!hasEntries(show) && !hasEntries(hide))
+                return false;
+            if (!*exe) {
+                *exe = captureClientExe(frame);
+                NSC_TRACE("capture client: %s\n", (*exe)->empty() ? "(unknown)" : (*exe)->c_str());
+            }
+            const auto& client = **exe;
+            if (hasEntries(hide))
+                return !client.empty() && !listHas(hide, client);
+            return listHas(show, client);
+        };
+    }
+
     // The surfaces this client may see get no_screen_share switched off for the cover
     // pass as well, so paintCovers treats them as normal windows: no cover, occlusion
     // and redraws as for any other window.
-    std::vector<SSuppressed> revealFor(Screenshare::CScreenshareFrame* frame, std::unordered_set<uintptr_t>& keys) {
-        std::vector<SSuppressed>   out;
-        const auto                 globalShow = cfgString(g_cfgShowTo);
-        const auto                 globalHide = cfgString(g_cfgHideFrom);
-        const bool                 anyGlobal  = hasEntries(globalShow) || hasEntries(globalHide);
-        std::optional<std::string> exe; // looked up only when some list applies
-        const auto                 client = [&]() -> const std::string& {
-            if (!exe) {
-                exe = captureClientExe(frame);
-                NSC_TRACE("capture client: %s\n", exe->empty() ? "(unknown)" : exe->c_str());
-            }
-            return *exe;
-        };
-        const auto consider = [&](uintptr_t key, Desktop::Types::COverridableVar<bool>& var, const SRuleValues& rules) {
-            const bool        ruleLists = rules.showTo || rules.hideFrom;
-            if (!ruleLists && !anyGlobal)
-                return;
-            const std::string show = ruleLists ? rules.showTo.value_or("") : globalShow;
-            const std::string hide = ruleLists ? rules.hideFrom.value_or("") : globalHide;
-            bool              reveal = false;
-            if (hasEntries(hide))
-                reveal = !client().empty() && !listHas(hide, client());
-            else if (hasEntries(show))
-                reveal = listHas(show, client());
-            if (!reveal)
+    std::vector<SSuppressed> revealFor(const SeesFn& sees, std::unordered_set<uintptr_t>& keys) {
+        std::vector<SSuppressed> out;
+        const auto               consider = [&](uintptr_t key, Desktop::Types::COverridableVar<bool>& var, const SRuleValues& rules) {
+            if (!sees(rules))
                 return;
             std::optional<bool> prev;
             if (var.hasValue() && var.getPriority() == Desktop::Types::PRIORITY_SET_PROP)
@@ -1382,15 +1390,15 @@ namespace {
     // the same close_hold / no_screen_share_cover_hold as a closing one: a browser changes
     // the window title before it repaints, so with a rule that matches the title the old
     // page would reach the stream for a frame or two when you switch away. Surfaces this
-    // client may see (show_to / hide_from) are not held.
-    std::vector<SSuppressed> holdUnhidden(const std::unordered_set<uintptr_t>& revealed) {
+    // client may see (show_to / hide_from) are not held, with the rules they had while hidden.
+    std::vector<SSuppressed> holdUnhidden(const std::unordered_set<uintptr_t>& revealed, const SeesFn& sees) {
         std::vector<SSuppressed> out;
         const auto               now  = std::chrono::steady_clock::now();
         const auto               keep = [&](uintptr_t key, Desktop::Types::COverridableVar<bool>& var) {
             if (var.valueOrDefault() || revealed.contains(key))
                 return;
             const auto it = g_lastCovers.find(key);
-            if (it == g_lastCovers.end() || now - it->second.at >= holdFor(it->second.rules))
+            if (it == g_lastCovers.end() || now - it->second.at >= holdFor(it->second.rules) || sees(it->second.rules))
                 return;
             std::optional<bool> prev;
             if (var.hasValue() && var.getPriority() == Desktop::Types::PRIORITY_SET_PROP)
@@ -1428,8 +1436,9 @@ namespace {
         }
         restoreNoScreenShare(suppressed);
         std::unordered_set<uintptr_t> revealedKeys;
-        const auto                    revealed = revealFor(self, revealedKeys);
-        const auto                    held     = holdUnhidden(revealedKeys);
+        const auto                    sees     = seesFor(self);
+        const auto                    revealed = revealFor(sees, revealedKeys);
+        const auto                    held     = holdUnhidden(revealedKeys, sees);
         const auto                    restore  = [&] {
             restoreNoScreenShare(held);
             restoreNoScreenShare(revealed);
@@ -1437,7 +1446,7 @@ namespace {
             g_heldRules.clear();
         };
         try {
-            paintCovers(self, true);
+            paintCovers(self, true, sees);
         } catch (...) {
             restore();
             throw;

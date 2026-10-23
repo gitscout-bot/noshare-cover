@@ -108,7 +108,7 @@ The same hold applies when a window stops being hidden while it stays on screen,
 that matches the title stops matching. A browser changes the window title before it repaints,
 so when you switch away from a matching tab the old page would otherwise reach the stream for
 a frame or two; set `no_screen_share_cover_hold` (e.g. 300) on such a rule. Clients listed in
-`show_to` get no hold.
+`show_to` get neither this hold nor the cover over a closing window: they see it as it is.
 
 By default hidden windows are covered in every capture: portal streams (browsers, Discord,
 OBS via PipeWire) and clients that capture the screen directly (grim, wf-recorder,
