@@ -82,7 +82,10 @@
 #include "render/Renderer.hpp"
 // 0.57: the render state is passed around explicitly (see RenderCtx)
 #if __has_include("render/Context.hpp")
+#include "managers/SessionLockManager.hpp"
+#include "pointer/PointerManager.hpp"
 #include "render/Context.hpp"
+#include "render/scene/MonitorScene.hpp"
 #define NSC_RENDER_CONTEXT 1
 #endif
 #include "render/pass/ClearPassElement.hpp"
@@ -363,8 +366,21 @@ namespace {
             notify(buf.data());
     }
 
+    // no_screen_share_cover = "transparent" (or path_cover): the surface is left out of the
+    // capture as if it wasn't there, instead of being covered (see CSceneSwap).
+    bool isTransparent(std::string_view path) {
+        constexpr std::string_view WORD = "transparent";
+        const auto                 start = path.find_first_not_of(" \t");
+        if (start == std::string_view::npos)
+            return false;
+        path = path.substr(start, path.find_last_not_of(" \t") - start + 1);
+        return std::ranges::equal(path, WORD, [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; });
+    }
+
     void pushSettings() {
-        const std::string path    = g_cfgPath ? g_cfgPath->value() : std::string{};
+        std::string path = g_cfgPath ? g_cfgPath->value() : std::string{};
+        if (isTransparent(path))
+            path.clear(); // the core never gets the word: a transparent surface is never resolved
         const std::string backend = g_cfgBackend ? g_cfgBackend->value() : std::string{"auto"};
         const std::string gpu     = g_cfgGpu ? g_cfgGpu->value() : std::string{};
 
@@ -434,6 +450,19 @@ namespace {
         std::optional<std::string> path, speed, loop, hold;
         std::optional<std::string> showTo, hideFrom; // per-rule capture client lists, override the global ones
     };
+
+    bool transparentCover(const SRuleValues& rules) {
+        return isTransparent(rules.path ? *rules.path : g_cfgPath ? g_cfgPath->value() : std::string{});
+    }
+
+    // Without Hyprland's capture scenes (before 0.57) nothing can be left out of the image.
+    void transparentUnsupported() {
+#ifndef NSC_RENDER_CONTEXT
+        static bool told = false;
+        if (!std::exchange(told, true))
+            notify("noshare-cover: no_screen_share_cover = \"transparent\" needs Hyprland 0.57 or newer, the surface gets the black box", 10000);
+#endif
+    }
 
     // Cursor zoom (cursor:zoom_factor). The screencast copies the monitor image after
     // the zoom, but Hyprland's no_screen_share boxes (and, before this, our covers) use
@@ -513,7 +542,8 @@ namespace {
         std::optional<bool>                    prev;
     };
 
-    std::vector<SSuppressed> suppressNoScreenShare() {
+    // keep: surfaces (by address) that stay hidden
+    std::vector<SSuppressed> suppressNoScreenShare(const std::unordered_set<uintptr_t>& keep = {}) {
         std::vector<SSuppressed> out;
         const auto               off = [&](Desktop::Types::COverridableVar<bool>& var) {
             if (!var.valueOrDefault())
@@ -525,10 +555,10 @@ namespace {
             out.push_back({&var, prev});
         };
         for (const auto& w : Desktop::windowState()->windows())
-            if (w && w->m_ruleApplicator)
+            if (w && w->m_ruleApplicator && !keep.contains(reinterpret_cast<uintptr_t>(w.get())))
                 off(w->m_ruleApplicator->noScreenShare());
         for (const auto& l : Desktop::layerState()->layers())
-            if (l && l->m_ruleApplicator)
+            if (l && l->m_ruleApplicator && !keep.contains(reinterpret_cast<uintptr_t>(l.get())))
                 off(l->m_ruleApplicator->noScreenShare());
         return out;
     }
@@ -680,7 +710,9 @@ namespace {
         for (const auto& w : Desktop::windowState()->windows()) {
             if (!w || reinterpret_cast<uintptr_t>(w.get()) != address)
                 continue;
-            const auto             rules = ruleValuesFor(w);
+            const auto rules = ruleValuesFor(w);
+            if (transparentCover(rules))
+                return nullptr; // another plugin's picture of it can only be blacked out
             const nsc_play_request req{
                 .rule_path  = rules.path ? rules.path->c_str() : nullptr,
                 .rule_speed = rules.speed ? rules.speed->c_str() : nullptr,
@@ -825,6 +857,8 @@ namespace {
     // would only get the black box: a screenshot has no later frame to catch up
     // in. Start opening as soon as a hidden window or layer gets its rules.
     void prewarm(const SRuleValues& rules) {
+        if (transparentCover(rules))
+            return;
         // settings normally arrive with the first capture frame; without them the
         // warmed cover would be dropped as soon as they do (settings change = reset)
         pushSettings();
@@ -856,7 +890,9 @@ namespace {
 
     // Returns the area it drew over (capture pixels). Clients that may see the surface
     // (show_to / hide_from) get no closing cover: they see its fade-out as it is.
-    CRegion paintClosing(RenderCtx& ctx, const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now, const SCaptureClient& client) {
+    // left: transparent surfaces were left out of this frame, their fade-outs too.
+    CRegion paintClosing(RenderCtx& ctx, const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now, const SCaptureClient& client,
+                         bool left) {
         CRegion drawnArea;
         for (auto& c : g_closing) {
             if (c.mon.lock() != mon)
@@ -881,6 +917,11 @@ namespace {
                 continue; // the pump drops it and repaints
             if (client.sees(c.rules))
                 continue;
+            const bool transparent = transparentCover(c.rules);
+            if (transparent && left)
+                continue;
+            if (transparent)
+                transparentUnsupported();
 
             const auto box =
                 zoomed(mon, CBox{c.box.x, c.box.y, std::max(c.box.w, 5.0), std::max(c.box.h, 5.0)}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
@@ -893,7 +934,7 @@ namespace {
                 .rule_loop  = c.rules.loop ? c.rules.loop->c_str() : nullptr,
             };
             nsc_frame  f{};
-            const auto tex = nsc_resolve(&req, &f) ? textureFor(f) : nullptr;
+            const auto tex = !transparent && nsc_resolve(&req, &f) ? textureFor(f) : nullptr;
             if (tex)
                 drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = c.roundingPower}, box);
             else
@@ -1141,7 +1182,10 @@ namespace {
     // ownBoxes: Hyprland's black boxes were suppressed for this frame (see
     // suppressNoScreenShare), so everything without a cover is drawn black here.
     // revealed: hidden surfaces this client sees as they are (see revealFor).
-    void paintCovers(RenderCtx& ctx, Screenshare::CScreenshareFrame* frame, bool ownBoxes, const SCaptureClient& client, const std::unordered_set<uintptr_t>& revealed) {
+    // left: surfaces with a transparent cover were left out of this frame's image (see
+    // CSceneSwap), so nothing goes over them; otherwise they get the black box.
+    void paintCovers(RenderCtx& ctx, Screenshare::CScreenshareFrame* frame, bool ownBoxes, const SCaptureClient& client, const std::unordered_set<uintptr_t>& revealed,
+                     bool left) {
         if (!frame || !frame->m_session || !g_pHyprRenderer) {
             NSC_TRACE("skip: frame %p session %d renderer %d\n", static_cast<void*>(frame), frame && frame->m_session ? 1 : 0, g_pHyprRenderer ? 1 : 0);
             return;
@@ -1167,14 +1211,22 @@ namespace {
         // placed over a hidden one stays visible. Layers (bars) are left alone: they are
         // often translucent and we can't tell.
         struct SVisible {
-            PHLWINDOW w;
-            SWinGeo   geo;
+            PHLWINDOW                  w;
+            SWinGeo                    geo;
+            std::optional<SRuleValues> rules;        // set for hidden windows
+            bool                       gone = false; // left out of the image, as if it wasn't there
         };
         std::vector<SVisible> visible;
-        for (const auto& w : Desktop::windowState()->windows())
-            if (w)
-                if (const auto g = windowGeo(w, mon, capturePos))
-                    visible.push_back({w, *g});
+        for (const auto& w : Desktop::windowState()->windows()) {
+            const auto g = w ? windowGeo(w, mon, capturePos) : std::nullopt;
+            if (!g)
+                continue;
+            auto& v = visible.emplace_back(SVisible{.w = w, .geo = *g});
+            if (w->m_ruleApplicator && w->m_ruleApplicator->noScreenShare().valueOrDefault()) {
+                v.rules = ruleValuesFor(w);
+                v.gone  = left && transparentCover(*v.rules);
+            }
+        }
         // o is stacked above me
         const auto isAbove = [&](size_t o, size_t me) {
             const auto& a = visible[o].geo;
@@ -1187,7 +1239,7 @@ namespace {
             // hidden window would show through, so the cover goes there too and the
             // translucent window is drawn again on top of it (see below).
             for (size_t j = 0; j < visible.size(); ++j)
-                if (isAbove(j, i) && visible[j].geo.opaque)
+                if (isAbove(j, i) && visible[j].geo.opaque && !visible[j].gone)
                     subtractRounded(region, visible[j].geo.box, visible[j].geo.round);
             return region;
         };
@@ -1195,29 +1247,19 @@ namespace {
 
         std::unordered_set<uintptr_t> seen;
         for (size_t i = 0; i < visible.size(); ++i) {
-            const auto& w = visible[i].w;
-            if (!w->m_ruleApplicator || !w->m_ruleApplicator->noScreenShare().valueOrDefault())
+            if (!visible[i].rules)
                 continue;
-
+            const auto& w             = visible[i].w;
+            const auto& rules         = *visible[i].rules;
             const auto& geo           = visible[i].geo;
             const auto  pos           = geo.pos;
             const auto  size          = geo.size;
             const auto  box           = geo.box;
             const int   round         = geo.round;
             const auto  roundingPower = geo.roundingPower;
-            g_animBoxes.push_back({mon, CBox{pos.x, pos.y, size.x, size.y}});
 
-            const CRegion clip = visibleRegion(i);
-            if (clip.empty()) {
-                NSC_TRACE("window %s: fully under other windows\n", windowClass(w).c_str());
-            }
-            if (ownBoxes && !windowIsX11(w)) {
-                if (const auto geo = windowClientGeometryPos(w))
-                    paintPopupBoxes(ctx, w, pos - *geo, mon, capturePos);
-            }
-
-            const auto rules = ruleValuesFor(w);
-            const auto key   = reinterpret_cast<uintptr_t>(w.get());
+            // kept for left out windows too: their fade-out on close and the hold
+            const auto key = reinterpret_cast<uintptr_t>(w.get());
             seen.insert(key);
             if (!g_held.contains(key)) // a held cover keeps the time and rules it had
                 g_lastCovers[key] = SLastCover{
@@ -1229,7 +1271,22 @@ namespace {
                 .roundingPower = windowRoundingPower(w),
                 .at            = now,
             };
+            if (visible[i].gone)
+                continue;
+            g_animBoxes.push_back({mon, CBox{pos.x, pos.y, size.x, size.y}});
 
+            const CRegion clip = visibleRegion(i);
+            if (clip.empty()) {
+                NSC_TRACE("window %s: fully under other windows\n", windowClass(w).c_str());
+            }
+            if (ownBoxes && !windowIsX11(w)) {
+                if (const auto geo = windowClientGeometryPos(w))
+                    paintPopupBoxes(ctx, w, pos - *geo, mon, capturePos);
+            }
+
+            const bool transparent = transparentCover(rules); // and still in the image
+            if (transparent)
+                transparentUnsupported();
             const nsc_play_request req{
                 .rule_path  = rules.path ? rules.path->c_str() : nullptr,
                 .rule_speed = rules.speed ? rules.speed->c_str() : nullptr,
@@ -1238,8 +1295,8 @@ namespace {
             if (clip.empty())
                 continue;
             nsc_frame f{};
-            if (!nsc_resolve(&req, &f)) {
-                NSC_TRACE("window %s: no cover frame yet\n", windowClass(w).c_str());
+            if (transparent || !nsc_resolve(&req, &f)) {
+                NSC_TRACE("window %s: no cover frame%s\n", windowClass(w).c_str(), transparent ? " (transparent, not left out)" : " yet");
                 if (ownBoxes) {
                     drawBlack(ctx, box, round, roundingPower, clip);
                     drawn.emplace_back(i, clip);
@@ -1281,7 +1338,7 @@ namespace {
                     continue;
                 region.intersect(CRegion{visible[j].geo.box});
                 for (size_t k = 0; k < visible.size(); ++k)
-                    if (isAbove(k, j) && visible[k].geo.opaque)
+                    if (isAbove(k, j) && visible[k].geo.opaque && !visible[k].gone)
                         subtractRounded(region, visible[k].geo.box, visible[k].geo.round);
                 for (const auto& [i, clip] : drawn)
                     if (isAbove(i, j))
@@ -1304,9 +1361,6 @@ namespace {
             const auto box  = zoomed(mon, CBox{pos.x, pos.y, std::max(size.x, 5.0), std::max(size.y, 5.0)}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
             if (box.w < 1 || box.h < 1)
                 continue;
-            g_animBoxes.push_back({mon, CBox{pos.x, pos.y, size.x, size.y}});
-            if (ownBoxes)
-                paintPopupBoxes(ctx, l, pos - l->m_geometry.pos(), mon, capturePos);
             const auto rules = ruleValuesFor(l);
             const auto key   = reinterpret_cast<uintptr_t>(l.get());
             seen.insert(key);
@@ -1319,6 +1373,14 @@ namespace {
                 .rules   = rules,
                 .at      = now,
             };
+            const bool transparent = transparentCover(rules);
+            if (transparent && left)
+                continue;
+            if (transparent)
+                transparentUnsupported();
+            g_animBoxes.push_back({mon, CBox{pos.x, pos.y, size.x, size.y}});
+            if (ownBoxes)
+                paintPopupBoxes(ctx, l, pos - l->m_geometry.pos(), mon, capturePos);
 
             const nsc_play_request req{
                 .rule_path  = rules.path ? rules.path->c_str() : nullptr,
@@ -1326,7 +1388,7 @@ namespace {
                 .rule_loop  = rules.loop ? rules.loop->c_str() : nullptr,
             };
             nsc_frame  f{};
-            const auto tex = nsc_resolve(&req, &f) ? textureFor(f) : nullptr;
+            const auto tex = !transparent && nsc_resolve(&req, &f) ? textureFor(f) : nullptr;
             if (tex) {
                 NSC_TRACE("layer %s: cover at %.0f,%.0f %.0fx%.0f\n", l->m_namespace.c_str(), box.x, box.y, box.w, box.h);
                 drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box}, box);
@@ -1340,7 +1402,7 @@ namespace {
         // being hidden right after it.
         seen.insert(revealed.begin(), revealed.end());
         trackClosed(mon, seen, now);
-        CRegion coverArea = paintClosing(ctx, mon, capturePos, now, client);
+        CRegion coverArea = paintClosing(ctx, mon, capturePos, now, client, left);
 
         // Layers above windows (bars, launchers, notifications) are drawn by Hyprland on
         // top of the hidden window, and the covers went over them. Draw them again on top,
@@ -1567,38 +1629,173 @@ namespace {
         return out;
     }
 
+#ifdef NSC_RENDER_CONTEXT
+    // Hidden surfaces on mon with a transparent cover that this client doesn't see (after
+    // revealFor and holdUnhidden), and whether one of them is still closing.
+    struct STransparentOn {
+        std::unordered_set<uintptr_t> keys;
+        bool                          closing = false;
+    };
+
+    STransparentOn transparentOn(const PHLMONITOR& mon, const Vector2D& capturePos, const SCaptureClient& client) {
+        STransparentOn out;
+        const auto     hidden = [](const auto& v) { return v && v->m_ruleApplicator && v->m_ruleApplicator->noScreenShare().valueOrDefault(); };
+        for (const auto& w : Desktop::windowState()->windows())
+            if (hidden(w) && windowGeo(w, mon, capturePos) && transparentCover(ruleValuesFor(w)))
+                out.keys.insert(reinterpret_cast<uintptr_t>(w.get()));
+        for (const auto& l : Desktop::layerState()->layers())
+            if (hidden(l) && viewVisible(l) && l->m_monitor.lock() == mon && transparentCover(ruleValuesFor(l)))
+                out.keys.insert(reinterpret_cast<uintptr_t>(l.get()));
+        const auto now     = std::chrono::steady_clock::now();
+        const auto applies = [&](const SRuleValues& rules) { return transparentCover(rules) && !client.sees(rules); };
+        out.closing        = std::ranges::any_of(g_closing, [&](const SClosing& c) { return c.mon.lock() == mon && (!c.holdUntil || now < *c.holdUntil) && applies(c.rules); }) ||
+            // gone since the last frame: trackClosed makes it a closing one only after this
+            // check, and the first frame of its fade-out must not show it either
+            std::ranges::any_of(g_lastCovers, [&](const auto& kv) { return !out.keys.contains(kv.first) && kv.second.mon.lock() == mon && applies(kv.second.rules); });
+        return out;
+    }
+
+    // IFramebuffer keeps its texture protected; a pointer to the member formed through a
+    // derived class reaches it.
+    struct SFramebufferAccess : Render::IFramebuffer {
+        static SP<Render::ITexture>& texture(Render::IFramebuffer& fb) {
+            return fb.*(&SFramebufferAccess::m_tex);
+        }
+    };
+
+    SP<Render::IFramebuffer> g_sceneFB, g_sceneZoomFB;
+
+    // fb allocated like the monitor's mirror image
+    SP<Render::IFramebuffer> likeMirror(SP<Render::IFramebuffer>& fb, const char* name, const SP<Render::IFramebuffer>& mirror) {
+        if (!fb)
+            fb = g_pHyprRenderer->createFB(name);
+        if (!fb || !fb->alloc(int(mirror->m_size.x), int(mirror->m_size.y), mirror->m_drmFormat))
+            return nullptr;
+        fb->setImageDescription(mirror->imageDescription());
+        return fb;
+    }
+
+    // A monitor capture copies the monitor's mirror image, the frame as it was shown. To
+    // leave surfaces out of it, the monitor is drawn again the way Hyprland draws its
+    // frame, as a capture scene (m_renderingCapture) in which only those surfaces keep
+    // no_screen_share: Hyprland skips them there, with their popups and fade-outs. Every
+    // other hidden window is drawn as it is, with its border and shadow, and gets its
+    // cover afterwards as usual. The result stands in for the mirror's texture while this
+    // lives, so Hyprland's own copy (region, scale, cursor) takes it as it takes the mirror.
+    class CSceneSwap {
+      public:
+        CSceneSwap(Render::CRenderContext& ctx, const PHLMONITOR& mon, const std::unordered_set<uintptr_t>& left);
+        ~CSceneSwap() {
+            if (m_mirror)
+                SFramebufferAccess::texture(*m_mirror) = m_real;
+        }
+        CSceneSwap(const CSceneSwap&)            = delete;
+        CSceneSwap& operator=(const CSceneSwap&) = delete;
+
+        bool        drawn() const {
+            return !!m_mirror;
+        }
+
+      private:
+        SP<Render::IFramebuffer> m_mirror;
+        SP<Render::ITexture>     m_real;
+    };
+
+    CSceneSwap::CSceneSwap(Render::CRenderContext& ctx, const PHLMONITOR& mon, const std::unordered_set<uintptr_t>& left) {
+        const auto res = mon->resources();
+        // locked: the mirror holds the lock screen, nothing to leave out
+        if (res.expired() || !res->hasMirrorFB() || mon->isMirror() || (g_pSessionLockManager && g_pSessionLockManager->isSessionLocked()))
+            return;
+        const auto mirror = res->mirrorFB();
+        const auto size   = mon->m_transformedSize;
+        const auto fb     = mirror->m_size == size ? likeMirror(g_sceneFB, "noshare-cover scene", mirror) : nullptr;
+        const auto zoom   = g_zoom.find(mon->m_id);
+        const auto out    = !fb || zoom == g_zoom.end() ? fb : likeMirror(g_sceneZoomFB, "noshare-cover zoomed scene", mirror);
+        if (!out) {
+            NSC_TRACE("scene: can't draw %s without the transparent surfaces\n", mon->m_name.c_str());
+            return;
+        }
+
+        {
+            const auto                          shown = suppressNoScreenShare(left);
+            const Hyprutils::Utils::CScopeGuard hideAgain{[&] { restoreNoScreenShare(shown); }};
+            const auto                          state    = ctx.saveDrawState(); // render data, backdrops and the blur flag below
+            const bool                          capture  = ctx.m_renderingCapture;
+            const bool                          feedback = ctx.m_blockSurfaceFeedback;
+            const Hyprutils::Utils::CScopeGuard flags{[&] {
+                ctx.m_renderingCapture     = capture;
+                ctx.m_blockSurfaceFeedback = feedback;
+            }};
+            ctx.m_renderingCapture     = true;
+            ctx.m_blockSurfaceFeedback = true;  // the surfaces had their frame already
+            mon->m_blurFBShouldRender  = false; // the cached blur is the main frame's to update
+
+            const auto    bound = g_pHyprRenderer->bindTempFB(ctx, fb);
+            const CRegion full{CBox{{}, size}};
+            ctx.m_data.mainFB      = fb;
+            ctx.m_data.damage      = full;
+            ctx.m_data.finalDamage = full;
+            g_pHyprRenderer->setProjectionType(ctx, Render::RPT_MONITOR);
+            g_pHyprRenderer->setViewport(0, 0, size.x, size.y);
+            drawElement(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, full);
+            {
+                // into a pass of its own: the frame's pass is drawn when the capture ends, over the covers
+                Render::CRenderPass pass;
+                const auto          redirect = g_pHyprRenderer->redirectPass(ctx, &pass);
+                const auto          now      = Time::steadyNow();
+                Render::CMonitorScene{mon}.draw(ctx, now);
+                // a software cursor is drawn into the frame, so the mirror image has it
+                if (g_pHyprRenderer->shouldRenderCursor()) {
+                    CRegion damage = full;
+                    Pointer::mgr()->renderSoftwareCursorsFor(ctx, mon, now, damage);
+                }
+                pass.render(ctx, full);
+            }
+            if (out != fb) {
+                // the mirror image is taken after the cursor zoom (see recordZoom)
+                const auto boundOut = g_pHyprRenderer->bindTempFB(ctx, out);
+                drawElement(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, full);
+                drawElement(ctx, CTexPassElement::SRenderData{.tex = fb->getTexture(), .box = zoom->second.box}, full);
+            }
+        }
+        NSC_TRACE("scene: %s drawn without %zu transparent surface(s)\n", mon->m_name.c_str(), left.size());
+        m_mirror = mirror;
+        m_real   = std::exchange(SFramebufferAccess::texture(*mirror), out->getTexture());
+    }
+#endif
+
     // original: Hyprland's renderMonitor for this frame
     template <class F>
     void renderMonitorWithCovers(Screenshare::CScreenshareFrame* self, RenderCtx& ctx, const F& original) {
         NSC_TRACE("hook: renderMonitor\n");
-        // Hyprland's boxes are always switched off and drawn by us: under zoom they land
-        // in the wrong place, and they are drawn over everything, including windows that
-        // sit on top of a hidden one.
-        const auto suppressed = suppressNoScreenShare();
-        try {
-            original();
-        } catch (...) {
-            restoreNoScreenShare(suppressed);
-            throw;
-        }
-        restoreNoScreenShare(suppressed);
         std::unordered_set<uintptr_t> revealedKeys;
         const SCaptureClient          client{.frame = self, .globalShow = cfgString(g_cfgShowTo), .globalHide = cfgString(g_cfgHideFrom)};
         const auto                    revealed = revealFor(client, revealedKeys);
         const auto                    held     = holdUnhidden(revealedKeys, client);
-        const auto                    restore  = [&] {
+        const Hyprutils::Utils::CScopeGuard restore{[&] {
             restoreNoScreenShare(held);
             restoreNoScreenShare(revealed);
             g_held.clear();
             g_heldRules.clear();
-        };
-        try {
-            paintCovers(ctx, self, true, client, revealedKeys);
-        } catch (...) {
-            restore();
-            throw;
+        }};
+        bool left = false;
+        {
+#ifdef NSC_RENDER_CONTEXT
+            std::optional<CSceneSwap> scene;
+            if (const auto mon = ctx.m_data.pMonitor.lock(); mon && self && self->m_session) {
+                const auto gone = transparentOn(mon, self->m_session->m_captureBox.pos(), client);
+                if (!gone.keys.empty() || gone.closing)
+                    left = scene.emplace(ctx, mon, gone.keys).drawn();
+            }
+#endif
+            // Hyprland's boxes are always switched off and drawn by us: under zoom they land
+            // in the wrong place, and they are drawn over everything, including windows that
+            // sit on top of a hidden one.
+            const auto                          suppressed = suppressNoScreenShare();
+            const Hyprutils::Utils::CScopeGuard unsuppress{[&] { restoreNoScreenShare(suppressed); }};
+            original();
         }
-        restore();
+        paintCovers(ctx, self, true, client, revealedKeys, left);
     }
 
 #ifdef NSC_RENDER_CONTEXT
@@ -1743,6 +1940,8 @@ namespace {
         g_zoom.clear();
 #ifdef NSC_RENDER_CONTEXT
         g_offscreen.reset();
+        g_sceneFB.reset();
+        g_sceneZoomFB.reset();
 #endif
         // API clients (gloview) drop our pointers and may take over renderMonitor.
         nsc_api_notify_gone();

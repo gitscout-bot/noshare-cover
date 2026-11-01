@@ -40,7 +40,7 @@ otherwise the cover would stall on a static monitor.
 hl.config({
     plugin = {
         no_screen_share_cover = {
-            -- png, jpg, jpeg, gif, mp4, m4v, mov, webm, mkv
+            -- png, jpg, jpeg, gif, mp4, m4v, mov, webm, mkv, or "transparent" (see below)
             path_cover = "~/.config/hypr/noshare-cover.gif",
             loop = true,
             speed = 1.0,
@@ -86,6 +86,24 @@ hl.layer_rule({
     no_screen_share_cover = "~/.config/hypr/NoCover/bar.png",
 })
 ```
+
+Instead of media, a window or layer can get `"transparent"`: it is left out of the capture as if
+it wasn't there, and the stream shows what is behind it (a hidden window behind it keeps its
+cover). Meant for notifications, OSDs and other popups that should simply not exist in a stream:
+
+```lua
+hl.layer_rule({
+    match = { namespace = "notifications" },
+    no_screen_share = true,
+    no_screen_share_cover = "transparent",
+})
+```
+
+`path_cover = "transparent"` does this for every hidden surface without a cover of its own.
+`show_to` and `hide_from` apply as they do to covers, and the close animation is left out too.
+While such a surface is on a captured monitor, every capture frame draws that monitor once more
+without it, so it costs one extra render of the monitor per captured frame, and nothing when
+there is none. This needs Hyprland 0.57 or newer; older versions give it the black box.
 
 The field names of the original plugin (`["no_screen_share_cover:path_cover"]`,
 `[":speed"]`, `[":loop"]`) still work.
