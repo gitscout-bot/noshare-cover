@@ -208,10 +208,9 @@ gloview releases it as soon as it sees noshare-cover, so load order doesn't matt
 | C++ compiler (C++26), `make`, `pkg-config` | the Hyprland shim | `base-devel`, `pkgconf` | in the flake |
 | Hyprland headers | the plugin API | `hyprland` (hyprpm installs its own) | from the Hyprland package |
 | `nasm` | AV1 decoder assembly (rav1d) | `nasm` | in the flake |
-| `clang` / libclang | bindings for the VA-API helper | `clang` | `bindgenHook` |
-| `libva`, `gbm` headers | the VA-API helper | `libva`, `mesa` | in the flake |
+| `libva`, `gbm` | the VA-API helper links against them | `libva`, `mesa` | in the flake |
 
-`make NSC_VAAPI=0` builds without VA-API; then clang, libva and gbm are not needed. `make`
+`make NSC_VAAPI=0` builds without VA-API; then libva and gbm are not needed. `make`
 checks everything first and lists what is missing.
 
 **At runtime** (all optional, the plugin loads without any of them)
@@ -231,8 +230,8 @@ referenced from the store; the NVIDIA and VA-API drivers come from the system
 
 ### hyprpm (Arch and others)
 
-Needs `cargo`, `nasm`, `clang` and `libva` headers to build (Arch:
-`pacman -S rust pkgconf nasm clang libva`). If something is missing, `make` says what and
+Needs `cargo`, `nasm` and `libva` to build (Arch:
+`pacman -S rust pkgconf nasm libva`). If something is missing, `make` says what and
 which package to install. Without VA-API: `make NSC_VAAPI=0`.
 
 ```sh
@@ -244,6 +243,11 @@ hyprpm reload
 No trailing `/` in the URL: with it hyprpm can't derive the repository name and installs the
 plugin outside its own directory. hyprpm builds against the running Hyprland and loads the
 plugin itself. Do not also call `hl.plugin.load`.
+
+The first build compiles everything (most of it is the AV1 decoder's assembly). hyprpm keeps
+cargo's build directory in `~/.cache/noshare-cover/target` (~500 MB), so the rebuild after a
+Hyprland update compiles only this repository's crates and the C++ part, about a fifth of the
+first build. Delete the directory to free the space; the next build starts from scratch.
 
 ### Arch
 

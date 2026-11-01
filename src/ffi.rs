@@ -379,9 +379,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nsc-ffi-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("c.png");
-        image::RgbaImage::from_pixel(4, 3, image::Rgba([0, 255, 0, 255]))
-            .save(&png)
-            .unwrap();
+        crate::media::still::write_png(&png, 4, 3, &[0, 255, 0, 255].repeat(12));
 
         assert!(nsc_init());
         let path = CString::new(png.to_str().unwrap()).unwrap();

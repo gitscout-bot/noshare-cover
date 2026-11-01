@@ -6,16 +6,12 @@
 //!
 //! Timestamps go through openh264 itself (uiInBsTimeStamp → uiOutYuvTimeStamp):
 //! with B-frames it outputs pictures in display order, and pts travels with the frame.
-//! The crate's wrapper can't do this, so we decode via its raw API.
 
+use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulonglong, c_void};
 use std::ptr::null_mut;
 use std::time::Duration;
 
-use openh264::OpenH264API;
-use openh264::decoder::{Decoder as Oh264, DecoderConfig};
-use openh264_sys2::{
-    DECODER_OPTION, DECODER_OPTION_NUM_OF_FRAMES_REMAINING_IN_BUFFER, SBufferInfo,
-};
+use libloading::Library;
 
 use crate::frame::FrameData;
 use crate::media::video::pipeline::{DecodedFrame, Decoder, Packet, PipeResult};
@@ -35,12 +31,130 @@ const CANDIDATES: &[&str] = &[
 /// Environment variable for an explicit path (e.g. a downloaded Cisco build).
 const ENV_PATH: &str = "NOSHARE_COVER_OPENH264";
 
+// The part of codec_api.h / codec_app_def.h the decoder needs. openh264 keeps this ABI
+// across 2.x (so.6–so.8); the layouts are pinned below against the C headers.
+
+#[repr(C)]
+struct SVideoProperty {
+    size: c_uint,
+    bitstream_type: c_int, // VIDEO_BITSTREAM_TYPE
+}
+
+#[repr(C)]
+struct SDecodingParam {
+    file_name_restructed: *mut c_char,
+    cpu_load: c_uint,
+    target_dq_layer: c_uchar,
+    error_concealment: c_int, // ERROR_CON_IDC
+    parse_only: bool,
+    video_property: SVideoProperty,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct SSysMemBuffer {
+    width: c_int,
+    height: c_int,
+    format: c_int,
+    stride: [c_int; 2],
+}
+
+#[repr(C)]
+struct SBufferInfo {
+    /// 1 when a picture is ready
+    buffer_status: c_int,
+    in_timestamp: c_ulonglong,
+    out_timestamp: c_ulonglong,
+    /// a one-member union in C
+    system_buffer: SSysMemBuffer,
+    dst: [*mut c_uchar; 3],
+}
+
+impl SBufferInfo {
+    fn new(in_timestamp: u64) -> Self {
+        Self {
+            buffer_status: 0,
+            in_timestamp,
+            out_timestamp: 0,
+            system_buffer: SSysMemBuffer::default(),
+            dst: [null_mut(); 3],
+        }
+    }
+}
+
+/// ISVCDecoder* in C: a pointer to the object, whose first field is the vtable pointer.
+type Handle = *mut *const Vtable;
+
+#[repr(C)]
+struct Vtable {
+    initialize: Option<unsafe extern "C" fn(Handle, *const SDecodingParam) -> c_long>,
+    uninitialize: *const c_void,
+    decode_frame: *const c_void,
+    decode_frame_no_delay: Option<
+        unsafe extern "C" fn(
+            Handle,
+            *const c_uchar,
+            c_int,
+            *mut *mut c_uchar,
+            *mut SBufferInfo,
+        ) -> c_int,
+    >,
+    decode_frame2: *const c_void,
+    flush_frame: Option<unsafe extern "C" fn(Handle, *mut *mut c_uchar, *mut SBufferInfo) -> c_int>,
+    decode_parser: *const c_void,
+    decode_frame_ex: *const c_void,
+    set_option: Option<unsafe extern "C" fn(Handle, c_int, *mut c_void) -> c_long>,
+    get_option: Option<unsafe extern "C" fn(Handle, c_int, *mut c_void) -> c_long>,
+}
+
+const _: () = {
+    use std::mem::{offset_of, size_of};
+    assert!(size_of::<SDecodingParam>() == 32 && offset_of!(SDecodingParam, video_property) == 24);
+    assert!(size_of::<SSysMemBuffer>() == 20);
+    assert!(
+        size_of::<SBufferInfo>() == 72
+            && offset_of!(SBufferInfo, system_buffer) == 24
+            && offset_of!(SBufferInfo, dst) == 48
+    );
+    assert!(
+        size_of::<Vtable>() == 80
+            && offset_of!(Vtable, flush_frame) == 40
+            && offset_of!(Vtable, get_option) == 72
+    );
+};
+
+const DECODER_OPTION_ERROR_CON_IDC: c_int = 8;
+const DECODER_OPTION_TRACE_LEVEL: c_int = 9;
+const DECODER_OPTION_NUM_OF_FRAMES_REMAINING_IN_BUFFER: c_int = 18;
+const DECODER_OPTION_NUM_OF_THREADS: c_int = 19;
+const WELS_LOG_QUIET: c_int = 0;
+const ERROR_CON_DISABLE: c_int = 0;
+const VIDEO_BITSTREAM_AVC: c_int = 0;
+
+type FnCreate = unsafe extern "C" fn(*mut Handle) -> c_long;
+type FnDestroy = unsafe extern "C" fn(Handle);
+
 pub struct H264Decoder {
-    dec: Oh264,
+    dec: Handle,
+    decode_no_delay: unsafe extern "C" fn(
+        Handle,
+        *const c_uchar,
+        c_int,
+        *mut *mut c_uchar,
+        *mut SBufferInfo,
+    ) -> c_int,
+    flush_frame: unsafe extern "C" fn(Handle, *mut *mut c_uchar, *mut SBufferInfo) -> c_int,
+    get_option: unsafe extern "C" fn(Handle, c_int, *mut c_void) -> c_long,
+    destroy: FnDestroy,
+    // keep the library loaded while pointers into it are alive
+    _lib: Library,
     /// Packets in a row that openh264 refused without producing a picture.
     refused: u32,
     last_state: i32,
 }
+
+// The decoder is only used from the decoder thread.
+unsafe impl Send for H264Decoder {}
 
 /// After this many refused packets in a row, report the stream as undecodable
 /// instead of silently showing nothing.
@@ -49,7 +163,7 @@ const MAX_REFUSED: u32 = 90;
 const DS_NO_PARAM_SETS: i32 = 0x10;
 const DS_BITSTREAM_ERROR: i32 = 0x04;
 
-fn load_api() -> Result<OpenH264API, String> {
+fn open_lib() -> Result<Library, String> {
     let mut tried = Vec::new();
     let explicit = std::env::var(ENV_PATH).ok();
     // NSC_LIB_OPENH264: absolute path baked in at build time (Nix: library from the store;
@@ -60,11 +174,9 @@ fn load_api() -> Result<OpenH264API, String> {
         .chain(option_env!("NSC_LIB_OPENH264"))
         .chain(CANDIDATES.iter().copied())
     {
-        // SAFETY: openh264 keeps a stable decoder C ABI across 2.x (so.6–so.8);
-        // the crate's hash check only accepts Cisco builds; distro builds
-        // come from the same sources.
-        match unsafe { OpenH264API::from_blob_path_unchecked(name) } {
-            Ok(api) => return Ok(api),
+        // SAFETY: openh264 has no constructors with side effects.
+        match unsafe { Library::new(name) } {
+            Ok(l) => return Ok(l),
             Err(e) => tried.push(format!("{name}: {e}")),
         }
     }
@@ -76,21 +188,88 @@ fn load_api() -> Result<OpenH264API, String> {
 
 impl H264Decoder {
     pub fn new() -> PipeResult<Self> {
-        let api = load_api()?;
-        let dec = Oh264::with_api_config(api, DecoderConfig::new())
-            .map_err(|e| format!("openh264: {e}"))?;
-        Ok(Self {
-            dec,
-            refused: 0,
-            last_state: 0,
-        })
+        let lib = open_lib()?;
+        // SAFETY: signatures and layouts are from codec_api.h (pinned above); the decoder
+        // is destroyed exactly once, here on failure or in Drop.
+        unsafe {
+            let sym = |n: &[u8]| -> Result<*const c_void, String> {
+                lib.get::<*const c_void>(n).map(|s| *s).map_err(|e| {
+                    format!(
+                        "libopenh264: missing {}: {e}",
+                        String::from_utf8_lossy(&n[..n.len() - 1])
+                    )
+                })
+            };
+            let create: FnCreate = std::mem::transmute(sym(b"WelsCreateDecoder\0")?);
+            let destroy: FnDestroy = std::mem::transmute(sym(b"WelsDestroyDecoder\0")?);
+            let mut dec: Handle = null_mut();
+            if create(&raw mut dec) != 0 || dec.is_null() || (*dec).is_null() {
+                return Err("openh264: WelsCreateDecoder failed".into());
+            }
+            let vt = &**dec;
+            let fail = |what: &str| -> String {
+                destroy(dec);
+                format!("openh264: {what}")
+            };
+            let (
+                Some(initialize),
+                Some(set_option),
+                Some(decode_no_delay),
+                Some(flush_frame),
+                Some(get_option),
+            ) = (
+                vt.initialize,
+                vt.set_option,
+                vt.decode_frame_no_delay,
+                vt.flush_frame,
+                vt.get_option,
+            )
+            else {
+                return Err(fail("incomplete decoder vtable"));
+            };
+            let param = SDecodingParam {
+                file_name_restructed: null_mut(),
+                cpu_load: 0,
+                target_dq_layer: 0,
+                error_concealment: ERROR_CON_DISABLE,
+                parse_only: false,
+                video_property: SVideoProperty {
+                    size: 0,
+                    bitstream_type: VIDEO_BITSTREAM_AVC,
+                },
+            };
+            if initialize(dec, &raw const param) != 0 {
+                return Err(fail("Initialize failed"));
+            }
+            // quiet log, single thread, no error concealment (a broken frame yields no picture)
+            for (option, mut value) in [
+                (DECODER_OPTION_TRACE_LEVEL, WELS_LOG_QUIET),
+                (DECODER_OPTION_NUM_OF_THREADS, 0),
+                (DECODER_OPTION_ERROR_CON_IDC, ERROR_CON_DISABLE),
+            ] {
+                if set_option(dec, option, (&raw mut value).cast()) != 0 {
+                    return Err(fail(&format!("SetOption {option} failed")));
+                }
+            }
+            Ok(Self {
+                dec,
+                decode_no_delay,
+                flush_frame,
+                get_option,
+                destroy,
+                _lib: lib,
+                refused: 0,
+                last_state: 0,
+            })
+        }
     }
 
     fn remaining(&mut self) -> usize {
-        let mut n: DECODER_OPTION = 0;
+        let mut n: c_int = 0;
         // SAFETY: GetOption writes one integer through the pointer.
         let r = unsafe {
-            self.dec.raw_api().get_option(
+            (self.get_option)(
+                self.dec,
                 DECODER_OPTION_NUM_OF_FRAMES_REMAINING_IN_BUFFER,
                 (&raw mut n).cast(),
             )
@@ -103,21 +282,27 @@ impl H264Decoder {
     }
 }
 
+impl Drop for H264Decoder {
+    fn drop(&mut self) {
+        // SAFETY: created in new, destroyed exactly once (WelsDestroyDecoder uninitializes it).
+        unsafe { (self.destroy)(self.dec) };
+    }
+}
+
 /// Frame from the openh264 buffer. The planes live until the next decoder call,
 /// so convert to BGRA right away.
 fn convert(dst: &[*mut u8; 3], info: &SBufferInfo) -> Option<DecodedFrame> {
-    if info.iBufferStatus != 1 || dst.iter().any(|p| p.is_null()) {
+    if info.buffer_status != 1 || dst.iter().any(|p| p.is_null()) {
         return None;
     }
-    // SAFETY: when iBufferStatus == 1, the union holds sSystemBuffer.
-    let sb = unsafe { info.UsrData.sSystemBuffer };
+    let sb = info.system_buffer;
     let (w, h) = (
-        usize::try_from(sb.iWidth).ok()?,
-        usize::try_from(sb.iHeight).ok()?,
+        usize::try_from(sb.width).ok()?,
+        usize::try_from(sb.height).ok()?,
     );
     let (ys, cs) = (
-        usize::try_from(sb.iStride[0]).ok()?,
-        usize::try_from(sb.iStride[1]).ok()?,
+        usize::try_from(sb.stride[0]).ok()?,
+        usize::try_from(sb.stride[1]).ok()?,
     );
     if w == 0 || h == 0 {
         return None;
@@ -143,7 +328,7 @@ fn convert(dst: &[*mut u8; 3], info: &SBufferInfo) -> Option<DecodedFrame> {
         },
     };
     Some(DecodedFrame {
-        pts: Duration::from_micros(info.uiOutYuvTimeStamp),
+        pts: Duration::from_micros(info.out_timestamp),
         data: FrameData::Cpu(yuv::to_bgra(&yuv)?),
     })
 }
@@ -203,20 +388,18 @@ impl Decoder for H264Decoder {
             return Ok(Vec::new());
         };
         let mut dst = [null_mut::<u8>(); 3];
-        let mut info = SBufferInfo {
-            uiInBsTimeStamp: u64::try_from(packet.pts.as_micros()).unwrap_or(u64::MAX),
-            ..Default::default()
-        };
+        let mut info = SBufferInfo::new(u64::try_from(packet.pts.as_micros()).unwrap_or(u64::MAX));
         // SAFETY: the packet outlives the call; dst/info are our output buffers.
         // The return code is ignored: a broken frame just yields no picture, and
         // the next keyframe fixes everything.
         unsafe {
-            self.last_state = self.dec.raw_api().decode_frame_no_delay(
+            self.last_state = (self.decode_no_delay)(
+                self.dec,
                 data.as_ptr(),
                 len,
                 dst.as_mut_ptr(),
                 &raw mut info,
-            ) as i32;
+            );
         }
         let frames: Vec<DecodedFrame> = convert(&dst, &info).into_iter().collect();
         if frames.is_empty() && self.last_state != 0 {
@@ -234,13 +417,9 @@ impl Decoder for H264Decoder {
         let mut out = Vec::new();
         for _ in 0..self.remaining() {
             let mut dst = [null_mut::<u8>(); 3];
-            let mut info = SBufferInfo::default();
+            let mut info = SBufferInfo::new(0);
             // SAFETY: same as in decode.
-            unsafe {
-                self.dec
-                    .raw_api()
-                    .flush_frame(dst.as_mut_ptr(), &raw mut info)
-            };
+            unsafe { (self.flush_frame)(self.dec, dst.as_mut_ptr(), &raw mut info) };
             out.extend(convert(&dst, &info));
         }
         Ok(out)

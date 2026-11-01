@@ -167,14 +167,12 @@ mod real {
                     .chunks(4)
                     .flat_map(|p| [p[2], p[1], p[0], p[3]])
                     .collect();
-                image::save_buffer(
-                    std::path::Path::new(&d).join(format!("{file}.png")),
-                    &rgba,
+                crate::media::still::write_png(
+                    &std::path::Path::new(&d).join(format!("{file}.png")),
                     c.width,
                     c.height,
-                    image::ExtendedColorType::Rgba8,
-                )
-                .unwrap();
+                    &rgba,
+                );
             }
             if let Some(prev) = last {
                 assert!(

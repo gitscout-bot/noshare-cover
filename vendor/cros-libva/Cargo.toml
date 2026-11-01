@@ -32,11 +32,5 @@ version = "1"
 [dev-dependencies.crc32fast]
 version = "1.2.1"
 
-[build-dependencies.bindgen]
-version = "0.70.1"
-
 [build-dependencies.pkg-config]
 version = "0.3.31"
-
-[build-dependencies.regex]
-version = "1.11.1"

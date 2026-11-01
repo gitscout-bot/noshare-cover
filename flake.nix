@@ -41,7 +41,6 @@
             pkgs.rustc
             pkgs.rustPlatform.cargoSetupHook
             pkgs.nasm # rav1d asm kernels (AV1 on CPU)
-            pkgs.rustPlatform.bindgenHook # cros-libva generates libva bindings
           ];
           # only for the VA-API helper (vaapi-helper); not linked into the plugin itself
           buildInputs = [

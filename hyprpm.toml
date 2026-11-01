@@ -6,5 +6,8 @@ authors = ["gitscout-bot"]
 description = "Image or video instead of the no_screen_share black box"
 authors = ["gitscout-bot"]
 output = "libnoshare-cover.so"
-# requires cargo (rustup or the rust package) in the user's PATH
-build = ["make -j$(nproc)"]
+# requires cargo (rustup or the rust package) in the user's PATH.
+# hyprpm builds in a fresh clone every time and deletes it afterwards; cargo's target
+# directory (~500 MB) is kept in the cache instead, so after a Hyprland update only this
+# repo's own crates and the C++ shim are compiled again, not rav1d and the rest.
+build = ["CARGO_TARGET_DIR=\"${XDG_CACHE_HOME:-$HOME/.cache}/noshare-cover/target\" make -j$(nproc)"]
