@@ -84,6 +84,8 @@ pub enum OpenDrmDisplayError {
     DeviceOpen(io::Error),
     #[error("vaGetDisplayDRM returned NULL")]
     VaGetDisplayDrm,
+    #[error("call to vaSetDriverName failed: {0}")]
+    VaSetDriverName(VaError),
     #[error("call to vaInitialize failed: {0}")]
     VaInitialize(VaError),
 }
@@ -93,6 +95,16 @@ impl Display {
     ///
     /// `path` is the path to a DRM device that supports VAAPI, e.g. `/dev/dri/renderD128`.
     pub fn open_drm_display<P: AsRef<Path>>(path: P) -> Result<Rc<Self>, OpenDrmDisplayError> {
+        Self::open_drm_display_with_driver(path, None)
+    }
+
+    /// Like [`Display::open_drm_display`], with the VA driver to load instead of the one libva
+    /// picks (`vaSetDriverName`). noshare-cover: LIBVA_DRIVER_NAME applies to every device, so
+    /// with two GPUs libva can load one GPU's driver for the other's render node.
+    pub fn open_drm_display_with_driver<P: AsRef<Path>>(
+        path: P,
+        driver: Option<&CStr>,
+    ) -> Result<Rc<Self>, OpenDrmDisplayError> {
         let file = std::fs::File::options()
             .read(true)
             .write(true)
@@ -104,6 +116,12 @@ impl Display {
         let display = unsafe { bindings::vaGetDisplayDRM(file.as_raw_fd()) };
         if display.is_null() {
             return Err(OpenDrmDisplayError::VaGetDisplayDrm);
+        }
+
+        if let Some(driver) = driver {
+            // Safe because the display is valid and not initialized yet; libva copies the name.
+            va_check(unsafe { bindings::vaSetDriverName(display, driver.as_ptr().cast_mut()) })
+                .map_err(OpenDrmDisplayError::VaSetDriverName)?;
         }
 
         let mut major = 0i32;
@@ -299,11 +317,15 @@ impl Display {
         surfaces: Option<&Vec<Surface<D>>>,
         progressive: bool,
     ) -> Result<Rc<Context>, VaError> {
+        // noshare-cover: cros-codecs creates a 16x16 context before it knows the stream, which
+        // drivers with a bigger minimum refuse (radeonsi 64x64, nvidia-vaapi-driver 48x64), so
+        // no decoder could be opened there. A context is never smaller than the driver's minimum.
+        let (min_width, min_height) = config.min_surface_size();
         Context::new(
             Rc::clone(self),
             config,
-            coded_width,
-            coded_height,
+            coded_width.max(min_width),
+            coded_height.max(min_height),
             surfaces,
             progressive,
         )

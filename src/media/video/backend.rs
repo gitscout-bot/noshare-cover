@@ -130,6 +130,34 @@ mod real {
     use crate::media::video::pipeline::Next;
 
     fn run_cpu(file: &str, decoder: &str) {
+        run(
+            file,
+            decoder,
+            Settings {
+                backend: Backend::Cpu,
+                ..Settings::default()
+            },
+        );
+    }
+
+    /// GPU decode on the render node in NSC_TEST_GPU (`/dev/dri/renderD129`); without it
+    /// the test is skipped.
+    fn run_gpu(file: &str, decoder: &str) {
+        let Some(node) = std::env::var_os("NSC_TEST_GPU") else {
+            return;
+        };
+        run(
+            file,
+            decoder,
+            Settings {
+                backend: Backend::Gpu,
+                gpu_device: Some(node.into()),
+                ..Settings::default()
+            },
+        );
+    }
+
+    fn run(file: &str, decoder: &str, s: Settings) {
         let Some(dir) = std::env::var_os("NSC_TEST_MEDIA").map(std::path::PathBuf::from) else {
             return;
         };
@@ -137,10 +165,6 @@ mod real {
         if !path.exists() {
             return;
         }
-        let s = Settings {
-            backend: Backend::Cpu,
-            ..Settings::default()
-        };
         let mut p = match open_pipeline(&path, true, &s) {
             Ok(p) => p,
             Err(e) if e.contains("not found") => {
@@ -202,5 +226,23 @@ mod real {
     #[test]
     fn av1_mp4_decodes_on_cpu() {
         run_cpu("av1.mp4", "rav1d (CPU)");
+    }
+
+    #[cfg(all(feature = "vaapi", target_os = "linux"))]
+    #[test]
+    fn h264_mp4_decodes_on_gpu() {
+        run_gpu("h264.mp4", "VA-API (GPU)");
+    }
+
+    #[cfg(all(feature = "vaapi", target_os = "linux"))]
+    #[test]
+    fn vp9_webm_decodes_on_gpu() {
+        run_gpu("vp9.webm", "VA-API (GPU)");
+    }
+
+    #[cfg(all(feature = "vaapi", target_os = "linux"))]
+    #[test]
+    fn av1_mp4_decodes_on_gpu() {
+        run_gpu("av1.mp4", "VA-API (GPU)");
     }
 }

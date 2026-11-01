@@ -13,8 +13,8 @@ no external processes.
 > `no_screen_share` shows the cover in a `grim` capture — still image, GIF, H.264, AV1, VP9 —
 > and survives repeated `hyprctl plugin unload/load` without thread or memory growth
 > (`tests/e2e/run.sh`). Builds with Nix against Hyprland 0.56.0 and 0.56.2 from nixpkgs and
-> with makepkg on Arch. GPU decoding (NVDEC, VA-API) is implemented but was not run on real
-> GPUs yet — see [Checking the GPU path](#checking-the-gpu-path).
+> with makepkg on Arch. VA-API decoding was run on an AMD iGPU (radeonsi: H.264, VP9, AV1);
+> for NVDEC see [Checking the GPU path](#checking-the-gpu-path).
 
 ## Video decoding
 
@@ -337,11 +337,18 @@ Set `backend = "gpu"` and a video `path_cover`, start any screen capture, then r
 `/tmp/nsc.log` and the Hyprland notification: with `gpu` the plugin never falls back, so a GPU
 problem is reported instead of hidden. Useful: `vainfo` (VA-API driver present), `nvidia-smi`.
 
+`gpu_device` can point at another GPU than the one that runs the session, e.g. decode the
+covers on an AMD or Intel iGPU and keep the NVIDIA card free. `LIBVA_DRIVER_NAME`, which NVIDIA
+setups often set to `nvidia`, applies to every device in libva; when it names another GPU's
+driver, the plugin loads the render node's own one (radeonsi for AMD, iHD/i965 for Intel).
+
 ## Development
 
 ```sh
 cargo test                 # core: config, clock, media, demux, decoders, registry, API, ABI layout
 NSC_TEST_MEDIA=dir cargo test   # + real files: h264.mp4, av1.mp4, vp9.webm (decoded and checked)
+NSC_TEST_MEDIA=dir NSC_TEST_GPU=/dev/dri/renderD129 NSC_VAAPI_HELPER=target/release/libnoshare_cover_vaapi.so \
+    cargo test --release        # + the same files on that GPU through VA-API (cargo build -p noshare-cover-vaapi first)
 tests/e2e/run.sh ./libnoshare-cover.so <media dir>   # live Hyprland + grim, unload/load cycles
 tests/e2e/with-gloview.sh ./libnoshare-cover.so ./gloview.so   # together with gloview
 cargo clippy --all-targets -- -D warnings

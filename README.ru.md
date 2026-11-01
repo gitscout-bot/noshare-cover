@@ -13,8 +13,8 @@
 > `no_screen_share` в захвате `grim` закрыто обложкой (картинка, GIF, H.264, AV1, VP9),
 > многократные `hyprctl plugin unload/load` не дают роста потоков и памяти
 > (`tests/e2e/run.sh`). Собирается Nix-ом против Hyprland 0.56.0 и 0.56.2 из nixpkgs и
-> makepkg на Arch. GPU-декод (NVDEC, VA-API) написан, но на настоящих видеокартах ещё не
-> запускался, см. [Проверка GPU](#проверка-gpu).
+> makepkg на Arch. Декод через VA-API проверен на встройке AMD (radeonsi: H.264, VP9, AV1),
+> про NVDEC см. [Проверка GPU](#проверка-gpu).
 
 ## Декод видео
 
@@ -337,11 +337,19 @@ NOSHARE_COVER_DEBUG=/tmp/nsc.log Hyprland   # или экспортируйте 
 с видеокартой будет показана, а не спрятана. Полезно: `vainfo` (есть ли драйвер VA-API),
 `nvidia-smi`.
 
+`gpu_device` может указывать не на ту видеокарту, на которой идёт сессия: например, декодировать
+обложки на встройке AMD или Intel, а NVIDIA оставить свободной. `LIBVA_DRIVER_NAME`, который на
+системах с NVIDIA часто ставят в `nvidia`, в libva действует на все устройства; если он называет
+драйвер другой видеокарты, плагин грузит родной драйвер устройства (radeonsi для AMD, iHD/i965
+для Intel).
+
 ## Разработка
 
 ```sh
 cargo test                 # ядро: конфиг, часы, медиа, демукс, декодеры, реестр, API, раскладка ABI
 NSC_TEST_MEDIA=dir cargo test   # + настоящие файлы: h264.mp4, av1.mp4, vp9.webm (декод и проверка)
+NSC_TEST_MEDIA=dir NSC_TEST_GPU=/dev/dri/renderD129 NSC_VAAPI_HELPER=target/release/libnoshare_cover_vaapi.so \
+    cargo test --release        # + те же файлы на этой видеокарте через VA-API (сначала cargo build -p noshare-cover-vaapi)
 tests/e2e/run.sh ./libnoshare-cover.so <каталог с роликами>        # живой Hyprland + grim, циклы unload/load
 tests/e2e/with-gloview.sh ./libnoshare-cover.so ./gloview.so     # вместе с gloview
 cargo clippy --all-targets -- -D warnings
