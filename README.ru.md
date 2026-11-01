@@ -9,7 +9,7 @@
 публичный API), тонкая C++-прослойка общается с C++ API плагинов Hyprland. Без FFmpeg,
 без cairo, без внешних процессов.
 
-> **Статус.** Работает целиком на живом Hyprland (0.56.2, Arch, llvmpipe): окно с
+> **Статус.** Работает целиком на живом Hyprland (0.56.2 на llvmpipe и 0.57.0, Arch): окно с
 > `no_screen_share` в захвате `grim` закрыто обложкой (картинка, GIF, H.264, AV1, VP9),
 > многократные `hyprctl plugin unload/load` не дают роста потоков и памяти
 > (`tests/e2e/run.sh`). Собирается Nix-ом против Hyprland 0.56.0 и 0.56.2 из nixpkgs и
