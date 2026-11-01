@@ -5,11 +5,10 @@ CARGO    ?= cargo
 RUST_LIB := target/release/libnoshare_cover.a
 RUST_SRC := Cargo.toml Cargo.lock build.rs $(shell find src -name '*.rs')
 # VA-API helper: a separate .so with libva/libgbm, embedded into the plugin (see
-# src/media/video/decode/vaapi.rs). NSC_VAAPI=0 builds without VA-API
-# (then libva, clang and the libva headers aren't needed).
+# src/media/video/decode/vaapi.rs). NSC_VAAPI=0 builds without VA-API (then libva
+# isn't needed).
 # All build requirements are checked up front and missing ones are listed,
-# instead of a silent "failed to build" in hyprpm. NSC_VAAPI=0 builds without
-# VA-API (then clang and libva aren't needed).
+# instead of a silent "failed to build" in hyprpm.
 NSC_VAAPI ?= 1
 have = $(shell command -v $(1) >/dev/null 2>&1 && echo y)
 havepc = $(shell pkg-config --exists $(1) 2>/dev/null && echo y)
@@ -27,12 +26,6 @@ ifneq ($(call havepc,hyprland),y)
 MISSING += hyprland-headers(hyprpm update / pacman:hyprland)
 endif
 ifeq ($(NSC_VAAPI),1)
-# bindgen needs libclang, not the clang binary: Nix's bindgenHook only sets LIBCLANG_PATH
-ifeq ($(LIBCLANG_PATH),)
-ifneq ($(call have,clang),y)
-MISSING += clang(pacman:clang)
-endif
-endif
 ifneq ($(call havepc,libva libva-drm),y)
 MISSING += libva(pacman:libva)
 endif
@@ -41,7 +34,7 @@ MISSING += gbm(pacman:mesa)
 endif
 endif
 ifneq ($(strip $(MISSING)),)
-$(error noshare-cover: missing build dependencies: $(strip $(MISSING)). Arch: sudo pacman -S --needed rust pkgconf nasm clang libva mesa. Without VA-API: make NSC_VAAPI=0)
+$(error noshare-cover: missing build dependencies: $(strip $(MISSING)). Arch: sudo pacman -S --needed rust pkgconf nasm libva mesa. Without VA-API: make NSC_VAAPI=0)
 endif
 HELPER   := target/release/libnoshare_cover_vaapi.so
 HELPER_SRC := vaapi-helper/Cargo.toml $(shell find vaapi-helper/src vendor -name '*.rs')

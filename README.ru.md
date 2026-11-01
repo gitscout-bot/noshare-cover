@@ -207,10 +207,9 @@ gloview отпускает её сам, как только видит noshare-c
 | компилятор C++ (C++26), `make`, `pkg-config` | прослойка для Hyprland | `base-devel`, `pkgconf` | есть во флейке |
 | заголовки Hyprland | API плагинов | `hyprland` (hyprpm ставит свои) | из пакета Hyprland |
 | `nasm` | ассемблер для декодера AV1 (rav1d) | `nasm` | есть во флейке |
-| `clang` / libclang | привязки для помощника VA-API | `clang` | `bindgenHook` |
-| заголовки `libva`, `gbm` | помощник VA-API | `libva`, `mesa` | есть во флейке |
+| `libva`, `gbm` | с ними линкуется помощник VA-API | `libva`, `mesa` | есть во флейке |
 
-`make NSC_VAAPI=0` собирает без VA-API; тогда clang, libva и gbm не нужны. `make` сначала
+`make NSC_VAAPI=0` собирает без VA-API; тогда libva и gbm не нужны. `make` сначала
 всё проверяет и пишет, чего не хватает.
 
 **Для работы** (всё необязательно, плагин грузится и без этого)
@@ -229,8 +228,8 @@ AV1 на процессоре, картинки и GIF ничего дополн
 
 ### hyprpm (Arch и другие)
 
-Для сборки нужны `cargo`, `nasm`, `clang` и заголовки `libva` (Arch:
-`pacman -S rust pkgconf nasm clang libva`). Если чего-то нет, `make` сразу напишет, чего
+Для сборки нужны `cargo`, `nasm` и `libva` (Arch:
+`pacman -S rust pkgconf nasm libva`). Если чего-то нет, `make` сразу напишет, чего
 именно и какой пакет поставить. Без VA-API: `make NSC_VAAPI=0`.
 
 ```sh

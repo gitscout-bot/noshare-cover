@@ -13,7 +13,7 @@ jobs:
       - name: Install dependencies
         run: |
           pacman -Syu --noconfirm --needed \
-            base-devel git rust pkgconf nasm clang libva mesa hyprland
+            base-devel git rust pkgconf nasm libva mesa hyprland
       - uses: actions/checkout@v4
       - name: Format
         run: cargo fmt --all --check

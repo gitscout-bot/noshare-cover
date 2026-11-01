@@ -9,7 +9,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/gitscout-bot/noshare-cover"
 license=('GPL-3.0-only')
 depends=('hyprland' 'gcc-libs' 'glibc')
-makedepends=('cargo' 'nasm' 'git' 'pkgconf' 'clang' 'libva' 'mesa')
+makedepends=('cargo' 'nasm' 'git' 'pkgconf' 'libva' 'mesa')
 optdepends=(
     'openh264: H.264 decoding on CPU'
     'libvpx: VP8/VP9 decoding on CPU'
