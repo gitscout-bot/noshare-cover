@@ -21,13 +21,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::config::{ConfigError, PlayParams, Settings};
 use crate::frame::Frame;
 use crate::media::{self, MediaError, Source};
 use crate::notify::Notifier;
+use crate::worker::Worker;
 
 /// Opens a source for the given parameters (replaced in tests).
 pub type Opener = fn(&PlayParams, &Settings) -> Result<Box<dyn Source>, MediaError>;
@@ -45,7 +45,7 @@ type Loaded = Result<(Box<dyn Source>, Option<Frame>), MediaError>;
 struct Loader {
     rx: Receiver<Loaded>,
     cancel: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<Worker>,
 }
 
 impl Loader {
@@ -66,10 +66,8 @@ impl Loader {
             });
             let _ = tx.send(r);
         };
-        let worker = std::thread::Builder::new()
-            .name("noshare-open".into())
-            .spawn(job)
-            .ok();
+        // started from Hyprland's thread: see worker.rs
+        let worker = Worker::spawn(c"noshare-open", job).ok();
         Self { rx, cancel, worker }
     }
 }
@@ -94,9 +92,7 @@ impl Drop for Loader {
         // The thread must be gone before the plugin can be unloaded. The registry
         // only drops loaders that are finished, or on its own drop (unload).
         self.cancel();
-        if let Some(w) = self.worker.take() {
-            let _ = w.join();
-        }
+        self.worker.take(); // joins
     }
 }
 
