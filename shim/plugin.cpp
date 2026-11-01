@@ -272,10 +272,11 @@ namespace {
     // Hyprland renders a capture frame only when the monitor repaints, and it
     // repaints only on damage. A video cover doesn't damage anything by itself,
     // so on a static monitor (e.g. while you work on another one) the stream
-    // would freeze. While the monitor is being shared and has a live animation,
+    // would freeze. While the monitor is being captured and has a live animation,
     // we damage the cover areas ~60 times per second.
-    // The condition is the share itself, not a recent capture frame: otherwise
-    // a pause in frames would stop the pump and nothing could wake it up again.
+    // A stream waiting for its next frame counts as capturing (see beingCaptured),
+    // not only a recent frame: otherwise a pause in frames would stop the pump and
+    // nothing could wake it up again.
     struct SAnimBox {
         PHLMONITORREF mon;
         CBox          box; // global logical coordinates
@@ -972,13 +973,31 @@ namespace {
 
     void startPump();
 
+    // Whether a client captures mon right now: a frame went out in the last half second
+    // (m_sharing), or one waits for the next commit. Hyprland's isOutputBeingSSd only asks
+    // whether a session exists, and a wlr-screencopy session (xdg-desktop-portal-hyprland,
+    // wf-recorder) is kept until the monitor goes away, even after its client has gone: after
+    // the first portal stream it stayed true until logout, and animated covers on screen got
+    // the monitor repainted 60 times a second with nothing capturing it.
+    bool beingCaptured(const PHLMONITOR& mon) {
+        const auto& mgr = Screenshare::mgr();
+        if (!mon || !mgr)
+            return false;
+        const auto ofMonitor = [&](const Screenshare::CScreenshareSession* s) {
+            return s && !s->m_stopped && (s->m_type == Screenshare::SHARE_MONITOR || s->m_type == Screenshare::SHARE_REGION) && s->m_monitor == mon;
+        };
+        // sessions and frames are owned by unique pointers: their weak pointers are only
+        // checked and read, never locked (hyprutils asserts)
+        return std::ranges::any_of(mgr->m_sessions, [&](const auto& s) { return !s.expired() && s->m_sharing && ofMonitor(s.get()); }) ||
+            std::ranges::any_of(mgr->m_pendingFrames, [&](const auto& f) { return !f.expired() && !f->done() && !f->m_session.expired() && ofMonitor(f->m_session.get()); });
+    }
+
     // Hyprland emits window.close / layer.closed from unmap, while the window or layer
     // still has its geometry and rules and before its fade-out exists. Starting the
     // closing cover here doesn't depend on the stream sending frames (a static screen
     // sends none, and the frame-based tracking above then only has old data).
     void startClosing(bool isLayer, uintptr_t key, const PHLMONITOR& mon, const CBox& box, SRuleValues&& rules, float rounding, float roundingPower) {
-        const auto& mgr = Screenshare::mgr();
-        if (!mon || !mgr || !mgr->isOutputBeingSSd(mon))
+        if (!beingCaptured(mon))
             return;
         g_lastCovers.erase(key); // don't start it a second time from the next frame
         g_closing.push_back(SClosing{
@@ -1183,12 +1202,8 @@ namespace {
     }
 
     void pumpTick(SP<CEventLoopTimer> self, void*) {
-        const auto& mgr    = Screenshare::mgr();
-        bool        any    = false;
-        const auto  shared = [&](const PHLMONITORREF& ref) {
-            const auto mon = ref.lock();
-            return mgr && mon && mgr->isOutputBeingSSd(mon);
-        };
+        bool       any    = false;
+        const auto shared = [](const PHLMONITORREF& ref) { return beingCaptured(ref.lock()); };
         if (g_pHyprRenderer) {
             if (nsc_animating()) {
                 for (const auto& a : g_animBoxes) {
@@ -1210,6 +1225,7 @@ namespace {
             std::erase_if(g_closing, [&](const SClosing& c) { return !shared(c.mon) || (c.holdUntil && now >= *c.holdUntil); });
         }
         if (!any) {
+            NSC_TRACE("pump: idle, nothing to repaint or nothing captured\n");
             g_animBoxes.clear();
             g_closing.clear();
             self->updateTimeout(std::nullopt); // sharing stopped, go idle
