@@ -103,7 +103,7 @@ size_t   nsc_take_notification(char* buf, size_t cap);
 size_t   nsc_extra_rects(int64_t monitor_id, nsc_extra_rect* out, size_t cap);
 
 /* Public ABI implementation (noshare_cover_api.h). It is exported by the
- * noshare_cover_* wrappers in shim/plugin.cpp: the whole Rust archive is linked
+ * noshare_cover_* wrappers in shim/main.cpp: the whole Rust archive is linked
  * hidden (--exclude-libs) so it doesn't share symbols with other plugins. */
 uint32_t nsc_api_api_version(void);
 bool     nsc_api_set_gone_callback(uint64_t client, void (*cb)(void* user), void* user);

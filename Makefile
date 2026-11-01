@@ -71,8 +71,18 @@ $(RUST_LIB): $(RUST_SRC)
 	$(CARGO) build --release --locked -p noshare-cover --no-default-features --features nvdec,cpu-av1,cpu-h264,cpu-vpx
 endif
 
-lib$(PLUGIN).so: shim/plugin.cpp include/noshare_cover.h include/noshare_cover_api.h Cargo.toml $(RUST_LIB)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) shim/plugin.cpp $(RUST_LIB) -o $@ $(LDFLAGS) $(LIBS)
+# The C++ shim: an object per shim/*.cpp in build/, compiled in parallel. The .d files make
+# them depend on every header they include, Hyprland's too, so new headers rebuild them.
+SHIM_OBJ := $(patsubst shim/%.cpp,build/%.o,$(wildcard shim/*.cpp))
+
+build/%.o: shim/%.cpp Cargo.toml
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+-include $(SHIM_OBJ:.o=.d)
+
+lib$(PLUGIN).so: $(SHIM_OBJ) $(RUST_LIB)
+	$(CXX) $(CXXFLAGS) $(SHIM_OBJ) $(RUST_LIB) -o $@ $(LDFLAGS) $(LIBS)
 
 test:
 	$(CARGO) test --locked
@@ -86,7 +96,7 @@ local: all
 	install -Dm755 lib$(PLUGIN).so $(HOME)/.config/hypr/plugins/$(PLUGIN).so
 
 clean:
-	rm -f lib$(PLUGIN).so
+	rm -rf lib$(PLUGIN).so build
 	$(CARGO) clean
 
 .PHONY: all test install local clean

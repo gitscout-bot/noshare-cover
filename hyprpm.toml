@@ -1,6 +1,12 @@
 [repository]
 name = "noshare-cover"
 authors = ["gitscout-bot"]
+# [hyprland commit, noshare-cover commit]: Hyprland 0.56.x builds the last version that supports it.
+commit_pins = [
+    ["36b2e0cfe0c6094dbc47bd42a437431315bb3087", "122b3017ec21ca80cad142a02fb0979e75ae0652"], # v0.56.0
+    ["5c9377c15f85c50648f35ca5a213754f95b93ca0", "122b3017ec21ca80cad142a02fb0979e75ae0652"], # v0.56.1
+    ["efb50993780079460b0cbed1363e2166a2de1d9f", "122b3017ec21ca80cad142a02fb0979e75ae0652"], # v0.56.2
+]
 
 [noshare-cover]
 description = "Image or video instead of the no_screen_share black box"
