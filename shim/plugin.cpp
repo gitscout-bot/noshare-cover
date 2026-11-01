@@ -85,6 +85,7 @@
 #include "render/Context.hpp"
 #define NSC_RENDER_CONTEXT 1
 #endif
+#include "render/pass/ClearPassElement.hpp"
 #include "render/pass/RectPassElement.hpp"
 #include "render/pass/TexPassElement.hpp"
 
@@ -1601,9 +1602,43 @@ namespace {
     }
 
 #ifdef NSC_RENDER_CONTEXT
+    // A capture into a client's dmabuf (portal streams: Discord, OBS) renders straight into a
+    // GL renderbuffer, which has no texture. Blur reads the render target, so under a
+    // translucent window over a cover Hyprland fell back to its cached blur of the wallpaper.
+    // With blur on, such a frame is drawn into a framebuffer of our own and copied over at
+    // the end, the way Hyprland draws a stored frame (m_tempFB).
+    SP<Render::IFramebuffer> g_offscreen;
+
+    SP<Render::IFramebuffer> offscreenFor(const SP<Render::IFramebuffer>& target) {
+        static auto PBLUR = CConfigValue<Config::INTEGER>("decoration:blur:enabled");
+        if (!*PBLUR || !target || target->getTexture() || target->m_size.x < 1 || target->m_size.y < 1)
+            return nullptr;
+        if (!g_offscreen)
+            g_offscreen = g_pHyprRenderer->createFB("noshare-cover capture");
+        const auto format = target->m_drmFormat != DRM_FORMAT_INVALID ? target->m_drmFormat : DRM_FORMAT_ARGB8888;
+        if (!g_offscreen || !g_offscreen->alloc(int(target->m_size.x), int(target->m_size.y), format))
+            return nullptr; // not drawable in this format: render as before
+        g_offscreen->setImageDescription(target->imageDescription());
+        return g_offscreen;
+    }
+
     void hkRenderMonitor(Screenshare::CScreenshareFrame* self, Render::CRenderContext& ctx) {
-        using Fn = void (*)(Screenshare::CScreenshareFrame*, Render::CRenderContext&);
-        renderMonitorWithCovers(self, ctx, [&] { reinterpret_cast<Fn>(g_hook->m_original)(self, ctx); });
+        using Fn            = void (*)(Screenshare::CScreenshareFrame*, Render::CRenderContext&);
+        const auto original = [&] { reinterpret_cast<Fn>(g_hook->m_original)(self, ctx); };
+        const auto target   = ctx.m_data.currentFB;
+        const auto off      = offscreenFor(target);
+        if (!off) {
+            renderMonitorWithCovers(self, ctx, original);
+            return;
+        }
+        const CBox    full{{}, target->m_size};
+        const CRegion region{full};
+        {
+            const auto bound = g_pHyprRenderer->bindTempFB(ctx, off);
+            drawElement(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, region);
+            renderMonitorWithCovers(self, ctx, original);
+        }
+        drawElement(ctx, CTexPassElement::SRenderData{.tex = off->getTexture(), .box = full}, region);
     }
 #else
     void hkRenderMonitor(Screenshare::CScreenshareFrame* self) {
@@ -1706,6 +1741,9 @@ namespace {
             g_zoomHook = nullptr;
         }
         g_zoom.clear();
+#ifdef NSC_RENDER_CONTEXT
+        g_offscreen.reset();
+#endif
         // API clients (gloview) drop our pointers and may take over renderMonitor.
         nsc_api_notify_gone();
         g_textures.clear();
