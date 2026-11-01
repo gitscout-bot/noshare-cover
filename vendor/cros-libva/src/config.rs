@@ -70,7 +70,7 @@ impl Config {
     // This function queries for all supported attributes for this configuration. In particular, if
     // the underlying hardware supports the creation of VA surfaces in various formats, then this
     // function will enumerate all pixel formats that are supported.
-    fn query_surface_attributes(&mut self) -> Result<Vec<bindings::VASurfaceAttrib>, VaError> {
+    fn query_surface_attributes(&self) -> Result<Vec<bindings::VASurfaceAttrib>, VaError> {
         // Safe because `self` represents a valid VAConfig. We first query how
         // much space is needed by the C API by passing in NULL in the first
         // call to `vaQuerySurfaceAttributes`.
@@ -104,6 +104,28 @@ impl Config {
         }
 
         Ok(attrs)
+    }
+
+    /// The smallest surface the driver decodes into with this config
+    /// (`VASurfaceAttribMinWidth` / `VASurfaceAttribMinHeight`), 0 for what it doesn't say.
+    pub(crate) fn min_surface_size(&self) -> (u32, u32) {
+        let attrs = self.query_surface_attributes().unwrap_or_default();
+        let get = |attr_type| {
+            attrs
+                .iter()
+                .find(|a| {
+                    a.type_ == attr_type
+                        && a.value.type_ == bindings::VAGenericValueType::VAGenericValueTypeInteger
+                })
+                // Safe because the type says the union holds an integer.
+                .map_or(0, |a| {
+                    u32::try_from(unsafe { a.value.value.i }).unwrap_or(0)
+                })
+        };
+        (
+            get(bindings::VASurfaceAttribType::VASurfaceAttribMinWidth),
+            get(bindings::VASurfaceAttribType::VASurfaceAttribMinHeight),
+        )
     }
 
     /// Query the surface attributes of type `attr_type`. The attribute may or may not be defined by

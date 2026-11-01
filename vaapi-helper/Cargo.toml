@@ -13,3 +13,4 @@ crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cros-codecs = { version = "0.0.6", features = ["vaapi"] }
+libc = "0.2"

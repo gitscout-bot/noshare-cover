@@ -408,6 +408,7 @@ name = "noshare-cover-vaapi"
 version = "2.0.12"
 dependencies = [
  "cros-codecs",
+ "libc",
 ]
 
 [[package]]
