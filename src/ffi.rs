@@ -1,4 +1,4 @@
-//! C ABI for the `shim/plugin.cpp` shim. Declared in `include/noshare_cover.h`.
+//! C ABI for the C++ shim (`shim/`). Declared in `include/noshare_cover.h`.
 //!
 //! Rules:
 //! - no panic crosses the boundary (`guard`), otherwise all of Hyprland goes down;

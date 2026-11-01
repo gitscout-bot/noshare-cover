@@ -13,7 +13,7 @@ members = [".", "vaapi-helper"]
 default-members = ["."]
 
 [lib]
-# staticlib is linked into libnoshare-cover.so together with the thin C++ shim (shim/plugin.cpp),
+# staticlib is linked into libnoshare-cover.so together with the thin C++ shim (shim/),
 # rlib is for cargo test.
 crate-type = ["staticlib", "rlib"]
 

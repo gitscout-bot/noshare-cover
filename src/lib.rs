@@ -2,8 +2,8 @@
 //!
 //! Hyprland offers plugins no C API, only its own C++ ABI, which is built for a
 //! specific compositor version. So all the logic lives here (media, decoding,
-//! playback clock, config, resource lifecycle, extra rects), and the thin shim
-//! `shim/plugin.cpp` only registers the hook, reads the config and window
+//! playback clock, config, resource lifecycle, extra rects), and the thin C++
+//! shim in `shim/` only registers the hook, reads the config and window
 //! rules, turns decoded frames into Hyprland textures and draws them.
 //!
 //! The boundary between them is the C ABI from [`ffi`], declared in `include/noshare_cover.h`.

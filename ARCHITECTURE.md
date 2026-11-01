@@ -8,11 +8,12 @@ plus render pass classes (`CTexPassElement`, `CRectPassElement`), window/layer r
 (`Desktop::Rule`) and config values (`Config::Values`). Hyprland has no C API for any of
 that, and its C++ ABI can't be called from Rust reliably (`SP<>` templates, virtual classes,
 header versions). So: **all logic lives in Rust, with a thin C++ layer only where the C++
-ABI is unavoidable.** The layer is a single file with no media logic.
+ABI is unavoidable.** The layer (`shim/`, a file per job, see `shim/shim.hpp`) has no media
+logic.
 
 ```
                     ┌──────────────── Hyprland (C++) ───────────────────┐
-  CScreenshareFrame │ renderMonitor ──hook──▶ shim/plugin.cpp           │
+  CScreenshareFrame │ renderMonitor ──hook──▶ shim/capture.cpp          │
                     │                         │ config, window/layer     │
                     │                         │ rules, geometry,         │
                     │                         │ textures, render pass    │
@@ -88,7 +89,7 @@ back and never has to keep a dlopen handle that would pin noshare-cover in memor
   EXIT), notify API clients, drop textures, `nsc_shutdown` (joins all threads), then rule
   effects and config values.
 - The Rust archive is linked hidden (`--exclude-libs,ALL`); the public API is exported by
-  thin wrappers in `shim/plugin.cpp`. Do not use a version script with `local: *`: it also
+  thin wrappers in `shim/main.cpp`. Do not use a version script with `local: *`: it also
   localizes Hyprland's inline globals (`g_pHyprRenderer` & co) and the plugin ends up with
   its own null copies.
 - `-fno-gnu-unique`: without it glibc marks the `.so` NODELETE and a reload silently gets
@@ -108,7 +109,7 @@ back and never has to keep a dlopen handle that would pin noshare-cover in memor
 | CPU: AV1 (rav1d), H.264 (openh264), VP8/VP9 (libvpx), YUV→BGRA | ✅ tests on real files + live Hyprland |
 | NVDEC (dlopen, driver parser, NV12/P016 copy) | ⚠️ builds, struct layouts checked against ffnvcodec-headers; not run on a GPU |
 | VA-API (vaapi-helper on cros-codecs, embedded, loaded from memfd) | ✅ H.264, VP9, AV1 on an AMD iGPU (radeonsi), tests with `NSC_TEST_GPU`; 8-bit only |
-| `shim/plugin.cpp` (0.57.x) | ✅ builds and runs on 0.57.0 |
+| `shim/` (0.57.x) | ✅ builds and runs on 0.57.0 |
 | Together with gloview | ✅ `tests/e2e/with-gloview.sh`: both load orders, unload/reload, overview tiles |
 | Unload/load, leaks | ✅ `tests/e2e/run.sh`: 8 cycles, threads and RSS stable |
 | Packaging: hyprpm, Arch PKGBUILD, Nix flake | ✅ makepkg; nix build against 0.57.0 in CI; hyprpm pins 0.56.x to the last version that supports it |

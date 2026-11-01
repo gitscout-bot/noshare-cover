@@ -2,3 +2,4 @@
 *.so
 result
 result-*
+/build/
