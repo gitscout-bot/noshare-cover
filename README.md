@@ -9,7 +9,7 @@ Version 2.0 is a rewrite: the core is Rust (media, decoding, playback clock, lif
 public API), and a thin C++ layer talks to Hyprland's C++ plugin API. No FFmpeg, no cairo,
 no external processes.
 
-> **Status.** Works end to end on a live Hyprland (0.56.2, Arch, llvmpipe): a window with
+> **Status.** Works end to end on a live Hyprland (0.56.2 on llvmpipe and 0.57.0, Arch): a window with
 > `no_screen_share` shows the cover in a `grim` capture — still image, GIF, H.264, AV1, VP9 —
 > and survives repeated `hyprctl plugin unload/load` without thread or memory growth
 > (`tests/e2e/run.sh`). Builds with Nix against Hyprland 0.56.0 and 0.56.2 from nixpkgs and

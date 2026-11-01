@@ -80,6 +80,11 @@
 #include "protocols/types/Buffer.hpp"
 #include "render/Framebuffer.hpp"
 #include "render/Renderer.hpp"
+// 0.57: the render state is passed around explicitly (see RenderCtx)
+#if __has_include("render/Context.hpp")
+#include "render/Context.hpp"
+#define NSC_RENDER_CONTEXT 1
+#endif
 #include "render/pass/RectPassElement.hpp"
 #include "render/pass/TexPassElement.hpp"
 
@@ -207,6 +212,32 @@ namespace {
         return w->presentation().roundingPower();
 #else
         return w->roundingPower();
+#endif
+    }
+
+    // The render state of the frame being drawn. 0.57 hands it to the screencast frame,
+    // the zoom transform and every draw call; 0.56 keeps it in the renderer, so there
+    // it's an empty tag and the helpers below go to g_pHyprRenderer.
+#ifdef NSC_RENDER_CONTEXT
+    using RenderCtx = Render::CRenderContext;
+#else
+    struct RenderCtx {};
+#endif
+
+    Render::SRenderData& renderData(RenderCtx& ctx) {
+#ifdef NSC_RENDER_CONTEXT
+        return ctx.m_data;
+#else
+        return g_pHyprRenderer->m_renderData;
+#endif
+    }
+
+    template <class T>
+    void drawElement(RenderCtx& ctx, const T& data, const CRegion& damage) {
+#ifdef NSC_RENDER_CONTEXT
+        g_pHyprRenderer->draw(ctx, data, damage);
+#else
+        g_pHyprRenderer->draw(data, damage);
 #endif
     }
 
@@ -413,23 +444,7 @@ namespace {
     std::unordered_map<MONITORID, SZoom> g_zoom;
     CFunctionHook*                       g_zoomHook = nullptr;
 
-    using ApplyZoomFn = void (*)(Monitor::CMonitorZoomController*, CBox&, const Render::SRenderData&);
-
-    // Only the normal monitor render feeds the screencast. m_renderMode is protected in
-    // some releases; there we can't tell and take every call.
-    template <class R>
-    bool normalRender(const R* r) {
-        if constexpr (requires { r->m_renderMode; })
-            return r->m_renderMode == Render::RENDER_MODE_NORMAL;
-        else
-            return true;
-    }
-
-    void hkApplyZoom(Monitor::CMonitorZoomController* self, CBox& monbox, const Render::SRenderData& rd) {
-        reinterpret_cast<ApplyZoomFn>(g_zoomHook->m_original)(self, monbox, rd);
-        const auto mon = rd.pMonitor.lock();
-        if (!mon || !normalRender(g_pHyprRenderer.get()))
-            return;
+    void recordZoom(const PHLMONITOR& mon, const CBox& monbox) {
         const auto full = mon->m_transformedSize;
         if (std::abs(monbox.x) < 0.5 && std::abs(monbox.y) < 0.5 && std::abs(monbox.w - full.x) < 0.5 && std::abs(monbox.h - full.y) < 0.5)
             g_zoom.erase(mon->m_id);
@@ -440,6 +455,34 @@ namespace {
             g_zoom[mon->m_id] = SZoom{.box = monbox, .full = full};
         }
     }
+
+    // Only the normal monitor render feeds the screencast.
+#ifdef NSC_RENDER_CONTEXT
+    using ApplyZoomFn = void (*)(Monitor::CMonitorZoomController*, Render::CRenderContext&, CBox&);
+
+    void hkApplyZoom(Monitor::CMonitorZoomController* self, Render::CRenderContext& ctx, CBox& monbox) {
+        reinterpret_cast<ApplyZoomFn>(g_zoomHook->m_original)(self, ctx, monbox);
+        if (const auto mon = ctx.m_data.pMonitor.lock(); mon && ctx.m_mode == Render::RENDER_MODE_NORMAL)
+            recordZoom(mon, monbox);
+    }
+#else
+    using ApplyZoomFn = void (*)(Monitor::CMonitorZoomController*, CBox&, const Render::SRenderData&);
+
+    // m_renderMode is protected in some releases; there we can't tell and take every call.
+    template <class R>
+    bool normalRender(const R* r) {
+        if constexpr (requires { r->m_renderMode; })
+            return r->m_renderMode == Render::RENDER_MODE_NORMAL;
+        else
+            return true;
+    }
+
+    void hkApplyZoom(Monitor::CMonitorZoomController* self, CBox& monbox, const Render::SRenderData& rd) {
+        reinterpret_cast<ApplyZoomFn>(g_zoomHook->m_original)(self, monbox, rd);
+        if (const auto mon = rd.pMonitor.lock(); mon && normalRender(g_pHyprRenderer.get()))
+            recordZoom(mon, monbox);
+    }
+#endif
 
     // Unzoomed monitor pixel box -> where it ends up in the screencast image.
     CBox zoomed(const PHLMONITOR& mon, const CBox& b) {
@@ -497,15 +540,15 @@ namespace {
     }
 
     // clip: where drawing is allowed (the draw is scissored to it); empty = the whole box
-    void drawBlack(const CBox& box, int round = 0, float roundingPower = 2.F, const CRegion& clip = {}) {
-        g_pHyprRenderer->draw(CRectPassElement::SRectData{.box = box, .color = CHyprColor{0.F, 0.F, 0.F, 1.F}, .round = round, .roundingPower = roundingPower},
-                              clip.empty() ? CRegion{box} : clip);
+    void drawBlack(RenderCtx& ctx, const CBox& box, int round = 0, float roundingPower = 2.F, const CRegion& clip = {}) {
+        drawElement(ctx, CRectPassElement::SRectData{.box = box, .color = CHyprColor{0.F, 0.F, 0.F, 1.F}, .round = round, .roundingPower = roundingPower},
+                    clip.empty() ? CRegion{box} : clip);
     }
 
     // Popups (menus, tooltips) of a hidden window or layer, black like Hyprland does.
     // Only needed when we draw the boxes ourselves (under zoom).
     template <class V>
-    void paintPopupBoxes(const V& view, const Vector2D& baseOffset, const PHLMONITOR& mon, const Vector2D& capturePos) {
+    void paintPopupBoxes(RenderCtx& ctx, const V& view, const Vector2D& baseOffset, const PHLMONITOR& mon, const Vector2D& capturePos) {
         const auto head = popupHeadOf(view);
         if (!head)
             return;
@@ -518,7 +561,7 @@ namespace {
                     [&](SP<CWLSurfaceResource> surf, const Vector2D& local, void*) {
                         const auto box = zoomed(mon, CBox{baseOffset + rel + local, surf->m_current.size}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
                         if (box.w > 0 && box.h > 0)
-                            drawBlack(box);
+                            drawBlack(ctx, box);
                     },
                     nullptr);
             },
@@ -810,7 +853,7 @@ namespace {
 
     // Returns the area it drew over (capture pixels). Clients that may see the surface
     // (show_to / hide_from) get no closing cover: they see its fade-out as it is.
-    CRegion paintClosing(const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now, const SCaptureClient& client) {
+    CRegion paintClosing(RenderCtx& ctx, const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now, const SCaptureClient& client) {
         CRegion drawnArea;
         for (auto& c : g_closing) {
             if (c.mon.lock() != mon)
@@ -849,16 +892,16 @@ namespace {
             nsc_frame  f{};
             const auto tex = nsc_resolve(&req, &f) ? textureFor(f) : nullptr;
             if (tex)
-                g_pHyprRenderer->draw(CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = c.roundingPower}, box);
+                drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = c.roundingPower}, box);
             else
-                drawBlack(box, round, c.roundingPower); // no cover set: at least hide it like no_screen_share would
+                drawBlack(ctx, box, round, c.roundingPower); // no cover set: at least hide it like no_screen_share would
             drawnArea.add(box);
         }
         return drawnArea;
     }
 
     // Draw a layer again from its surface textures with its alpha, limited to clip.
-    void redrawLayer(const PHLLS& l, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
+    void redrawLayer(RenderCtx& ctx, const PHLLS& l, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
         const auto res = l->resource();
         if (!res)
             return;
@@ -873,12 +916,12 @@ namespace {
                     return;
                 const auto box = zoomed(mon, CBox{base + local, surf->m_current.size}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
                 if (box.w >= 1 && box.h >= 1)
-                    g_pHyprRenderer->draw(CTexPassElement::SRenderData{.tex = tex, .box = box, .a = alpha, .clipRegion = clip}, clip);
+                    drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .a = alpha, .clipRegion = clip}, clip);
             },
             nullptr);
     }
 
-    void paintExtraRects(const PHLMONITOR& mon, const Vector2D& capturePos) {
+    void paintExtraRects(RenderCtx& ctx, const PHLMONITOR& mon, const Vector2D& capturePos) {
         // Usually a few dozen overlay tiles; if there are more, take as many as reported.
         std::vector<nsc_extra_rect> rects(64);
         size_t                      n = nsc_extra_rects(mon->m_id, rects.data(), rects.size());
@@ -896,17 +939,11 @@ namespace {
 
             if (r.fill == 1) {
                 if (const auto tex = coverForWindowAddress(r.window)) {
-                    g_pHyprRenderer->draw(CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round}, box);
+                    drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round}, box);
                     continue;
                 }
             }
-            g_pHyprRenderer->draw(
-                CRectPassElement::SRectData{
-                    .box   = box,
-                    .color = CHyprColor{0.F, 0.F, 0.F, 1.F},
-                    .round = round,
-                },
-                box);
+            drawBlack(ctx, box, round);
         }
     }
 
@@ -1015,7 +1052,7 @@ namespace {
     // Draw a window again from its surface textures, with its alpha, rounding and blur,
     // limited to clip. Used for translucent windows above a hidden one: the cover went
     // over them, and this puts them back on top of it.
-    void redrawWindow(const PHLWINDOW& w, const SWinGeo& geo, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
+    void redrawWindow(RenderCtx& ctx, const PHLWINDOW& w, const SWinGeo& geo, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
         const auto res = w->resource();
         if (!res)
             return;
@@ -1039,21 +1076,21 @@ namespace {
                 const auto box  = zoomed(mon, CBox{base + local, surf->m_current.size}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
                 if (box.w < 1 || box.h < 1)
                     return;
-                g_pHyprRenderer->draw(
-                    CTexPassElement::SRenderData{
-                        .tex                   = tex,
-                        .box                   = box,
-                        .a                     = alpha,
-                        .blurA                 = fade, // the blur fades with the window, as in Hyprland
-                        .round                 = main ? geo.round : 0,
-                        .roundingPower         = geo.roundingPower,
-                        .blur                  = main && blur,
-                        .blockBlurOptimization = true, // blur what is really under it (the cover), not the cached wallpaper
-                        // the damage clip alone isn't enough: the blur pass draws the blurred
-                        // background over the whole box unless clipRegion is set
-                        .clipRegion = clip,
-                    },
-                    clip);
+                drawElement(ctx,
+                            CTexPassElement::SRenderData{
+                                .tex                   = tex,
+                                .box                   = box,
+                                .a                     = alpha,
+                                .blurA                 = fade, // the blur fades with the window, as in Hyprland
+                                .round                 = main ? geo.round : 0,
+                                .roundingPower         = geo.roundingPower,
+                                .blur                  = main && blur,
+                                .blockBlurOptimization = true, // blur what is really under it (the cover), not the cached wallpaper
+                                // the damage clip alone isn't enough: the blur pass draws the blurred
+                                // background over the whole box unless clipRegion is set
+                                .clipRegion = clip,
+                            },
+                            clip);
             },
             nullptr);
     }
@@ -1061,12 +1098,12 @@ namespace {
     // ownBoxes: Hyprland's black boxes were suppressed for this frame (see
     // suppressNoScreenShare), so everything without a cover is drawn black here.
     // revealed: hidden surfaces this client sees as they are (see revealFor).
-    void paintCovers(Screenshare::CScreenshareFrame* frame, bool ownBoxes, const SCaptureClient& client, const std::unordered_set<uintptr_t>& revealed) {
+    void paintCovers(RenderCtx& ctx, Screenshare::CScreenshareFrame* frame, bool ownBoxes, const SCaptureClient& client, const std::unordered_set<uintptr_t>& revealed) {
         if (!frame || !frame->m_session || !g_pHyprRenderer) {
             NSC_TRACE("skip: frame %p session %d renderer %d\n", static_cast<void*>(frame), frame && frame->m_session ? 1 : 0, g_pHyprRenderer ? 1 : 0);
             return;
         }
-        const auto mon = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        const auto mon = renderData(ctx).pMonitor.lock();
         if (!mon) {
             NSC_TRACE("skip: no monitor in render data\n");
             return;
@@ -1133,7 +1170,7 @@ namespace {
             }
             if (ownBoxes && !windowIsX11(w)) {
                 if (const auto geo = windowClientGeometryPos(w))
-                    paintPopupBoxes(w, pos - *geo, mon, capturePos);
+                    paintPopupBoxes(ctx, w, pos - *geo, mon, capturePos);
             }
 
             const auto rules = ruleValuesFor(w);
@@ -1161,7 +1198,7 @@ namespace {
             if (!nsc_resolve(&req, &f)) {
                 NSC_TRACE("window %s: no cover frame yet\n", windowClass(w).c_str());
                 if (ownBoxes) {
-                    drawBlack(box, round, roundingPower, clip);
+                    drawBlack(ctx, box, round, roundingPower, clip);
                     drawn.emplace_back(i, clip);
                 }
                 continue;
@@ -1170,13 +1207,13 @@ namespace {
             if (!tex) {
                 NSC_TRACE("window %s: texture failed (%ux%u)\n", windowClass(w).c_str(), f.width, f.height);
                 if (ownBoxes) {
-                    drawBlack(box, round, roundingPower, clip);
+                    drawBlack(ctx, box, round, roundingPower, clip);
                     drawn.emplace_back(i, clip);
                 }
                 continue;
             }
             NSC_TRACE("window %s: cover %ux%u at %.0f,%.0f %.0fx%.0f\n", windowClass(w).c_str(), f.width, f.height, box.x, box.y, box.w, box.h);
-            g_pHyprRenderer->draw(CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = roundingPower}, clip);
+            drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = roundingPower}, clip);
             drawn.emplace_back(i, clip);
         }
 
@@ -1209,7 +1246,7 @@ namespace {
                 if (region.empty())
                     continue;
                 NSC_TRACE("window %s: redrawn over a cover\n", windowClass(visible[j].w).c_str());
-                redrawWindow(visible[j].w, visible[j].geo, region, mon, capturePos);
+                redrawWindow(ctx, visible[j].w, visible[j].geo, region, mon, capturePos);
             }
         }
 
@@ -1226,7 +1263,7 @@ namespace {
                 continue;
             g_animBoxes.push_back({mon, CBox{pos.x, pos.y, size.x, size.y}});
             if (ownBoxes)
-                paintPopupBoxes(l, pos - l->m_geometry.pos(), mon, capturePos);
+                paintPopupBoxes(ctx, l, pos - l->m_geometry.pos(), mon, capturePos);
             const auto rules = ruleValuesFor(l);
             const auto key   = reinterpret_cast<uintptr_t>(l.get());
             seen.insert(key);
@@ -1249,9 +1286,9 @@ namespace {
             const auto tex = nsc_resolve(&req, &f) ? textureFor(f) : nullptr;
             if (tex) {
                 NSC_TRACE("layer %s: cover at %.0f,%.0f %.0fx%.0f\n", l->m_namespace.c_str(), box.x, box.y, box.w, box.h);
-                g_pHyprRenderer->draw(CTexPassElement::SRenderData{.tex = tex, .box = box}, box);
+                drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box}, box);
             } else if (ownBoxes)
-                drawBlack(box);
+                drawBlack(ctx, box);
         }
 
         // Surfaces shown as they are to this client are still hidden and on screen: keep
@@ -1260,7 +1297,7 @@ namespace {
         // being hidden right after it.
         seen.insert(revealed.begin(), revealed.end());
         trackClosed(mon, seen, now);
-        CRegion coverArea = paintClosing(mon, capturePos, now, client);
+        CRegion coverArea = paintClosing(ctx, mon, capturePos, now, client);
 
         // Layers above windows (bars, launchers, notifications) are drawn by Hyprland on
         // top of the hidden window, and the covers went over them. Draw them again on top,
@@ -1281,12 +1318,12 @@ namespace {
                     if (region.empty())
                         continue;
                     NSC_TRACE("layer %s: redrawn over a cover\n", l->m_namespace.c_str());
-                    redrawLayer(l, region, mon, capturePos);
+                    redrawLayer(ctx, l, region, mon, capturePos);
                 }
             }
         }
 
-        paintExtraRects(mon, capturePos);
+        paintExtraRects(ctx, mon, capturePos);
         nsc_end_frame();
         if ((!g_animBoxes.empty() && nsc_animating()) || !g_closing.empty())
             startPump();
@@ -1487,17 +1524,16 @@ namespace {
         return out;
     }
 
-    using RenderMonitorFn = void (*)(Screenshare::CScreenshareFrame*);
-
-    void hkRenderMonitor(Screenshare::CScreenshareFrame* self) {
+    // original: Hyprland's renderMonitor for this frame
+    template <class F>
+    void renderMonitorWithCovers(Screenshare::CScreenshareFrame* self, RenderCtx& ctx, const F& original) {
         NSC_TRACE("hook: renderMonitor\n");
-        const auto original = reinterpret_cast<RenderMonitorFn>(g_hook->m_original);
         // Hyprland's boxes are always switched off and drawn by us: under zoom they land
         // in the wrong place, and they are drawn over everything, including windows that
         // sit on top of a hidden one.
         const auto suppressed = suppressNoScreenShare();
         try {
-            original(self);
+            original();
         } catch (...) {
             restoreNoScreenShare(suppressed);
             throw;
@@ -1514,13 +1550,26 @@ namespace {
             g_heldRules.clear();
         };
         try {
-            paintCovers(self, true, client, revealedKeys);
+            paintCovers(ctx, self, true, client, revealedKeys);
         } catch (...) {
             restore();
             throw;
         }
         restore();
     }
+
+#ifdef NSC_RENDER_CONTEXT
+    void hkRenderMonitor(Screenshare::CScreenshareFrame* self, Render::CRenderContext& ctx) {
+        using Fn = void (*)(Screenshare::CScreenshareFrame*, Render::CRenderContext&);
+        renderMonitorWithCovers(self, ctx, [&] { reinterpret_cast<Fn>(g_hook->m_original)(self, ctx); });
+    }
+#else
+    void hkRenderMonitor(Screenshare::CScreenshareFrame* self) {
+        using Fn = void (*)(Screenshare::CScreenshareFrame*);
+        RenderCtx ctx;
+        renderMonitorWithCovers(self, ctx, [&] { reinterpret_cast<Fn>(g_hook->m_original)(self); });
+    }
+#endif
 
     template <typename T, typename... Args>
     SP<T> makeValue(const char* name, const char* desc, Args&&... def) {
