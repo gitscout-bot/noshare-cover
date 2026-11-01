@@ -88,6 +88,8 @@
 #include "render/pass/RectPassElement.hpp"
 #include "render/pass/TexPassElement.hpp"
 
+#include <hyprutils/utils/ScopeGuard.hpp>
+
 #include <aquamarine/buffer/Buffer.hpp>
 
 // The screencast frame's m_session is private, and upstream offers no public event
@@ -900,6 +902,46 @@ namespace {
         return drawnArea;
     }
 
+    // The part of a surface's buffer the client shows (its wp_viewporter source), as texture
+    // UVs, computed like Hyprland's calculateUVForSurface; nullopt for the whole buffer.
+    std::optional<std::pair<Vector2D, Vector2D>> viewportUV(const SP<CWLSurfaceResource>& surf) {
+        const auto& st = surf->m_current;
+        if (!st.viewport.hasSource || st.bufferSize.x <= 0 || st.bufferSize.y <= 0)
+            return std::nullopt;
+        // viewporter order: buffer transform, then buffer scale, then the source crop
+        const Vector2D size = st.transform % 2 == 1 ? Vector2D{st.bufferSize.y, st.bufferSize.x} : st.bufferSize;
+        CBox           src  = st.viewport.source;
+        src.scale(st.scale);
+        src.transform(Math::wlTransformToHyprutils(Math::invertTransform(st.transform)), size.x, size.y);
+        const Vector2D topLeft{src.x / st.bufferSize.x, src.y / st.bufferSize.y};
+        const Vector2D bottomRight{(src.x + src.width) / st.bufferSize.x, (src.y + src.height) / st.bufferSize.y};
+        if (bottomRight.x < 0.00001 || bottomRight.y < 0.00001)
+            return std::nullopt;
+        return std::pair{topLeft, bottomRight};
+    }
+
+    // Draw a client surface's texture into box (its logical size), cropped to what the
+    // client shows. Chromium keeps an oversized buffer and shows a viewporter crop of it:
+    // drawn whole, the page shrank into a corner of the window and blur filled the rest.
+    void drawSurfaceTexture(RenderCtx& ctx, const SP<CWLSurfaceResource>& surf, CTexPassElement::SRenderData data, const CRegion& damage) {
+        const auto uv = viewportUV(surf);
+        if (!uv) {
+            drawElement(ctx, data, damage);
+            return;
+        }
+        auto&                         rd          = renderData(ctx);
+        const auto                    topLeft     = rd.primarySurfaceUVTopLeft;
+        const auto                    bottomRight = rd.primarySurfaceUVBottomRight;
+        Hyprutils::Utils::CScopeGuard restore{[&] {
+            rd.primarySurfaceUVTopLeft     = topLeft;
+            rd.primarySurfaceUVBottomRight = bottomRight;
+        }};
+        rd.primarySurfaceUVTopLeft     = uv->first;
+        rd.primarySurfaceUVBottomRight = uv->second;
+        data.allowCustomUV             = true;
+        drawElement(ctx, data, damage);
+    }
+
     // Draw a layer again from its surface textures with its alpha, limited to clip.
     void redrawLayer(RenderCtx& ctx, const PHLLS& l, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
         const auto res = l->resource();
@@ -916,7 +958,7 @@ namespace {
                     return;
                 const auto box = zoomed(mon, CBox{base + local, surf->m_current.size}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
                 if (box.w >= 1 && box.h >= 1)
-                    drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .a = alpha, .clipRegion = clip}, clip);
+                    drawSurfaceTexture(ctx, surf, CTexPassElement::SRenderData{.tex = tex, .box = box, .a = alpha, .clipRegion = clip}, clip);
             },
             nullptr);
     }
@@ -1076,21 +1118,21 @@ namespace {
                 const auto box  = zoomed(mon, CBox{base + local, surf->m_current.size}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
                 if (box.w < 1 || box.h < 1)
                     return;
-                drawElement(ctx,
-                            CTexPassElement::SRenderData{
-                                .tex                   = tex,
-                                .box                   = box,
-                                .a                     = alpha,
-                                .blurA                 = fade, // the blur fades with the window, as in Hyprland
-                                .round                 = main ? geo.round : 0,
-                                .roundingPower         = geo.roundingPower,
-                                .blur                  = main && blur,
-                                .blockBlurOptimization = true, // blur what is really under it (the cover), not the cached wallpaper
-                                // the damage clip alone isn't enough: the blur pass draws the blurred
-                                // background over the whole box unless clipRegion is set
-                                .clipRegion = clip,
-                            },
-                            clip);
+                drawSurfaceTexture(ctx, surf,
+                                   CTexPassElement::SRenderData{
+                                       .tex                   = tex,
+                                       .box                   = box,
+                                       .a                     = alpha,
+                                       .blurA                 = fade, // the blur fades with the window, as in Hyprland
+                                       .round                 = main ? geo.round : 0,
+                                       .roundingPower         = geo.roundingPower,
+                                       .blur                  = main && blur,
+                                       .blockBlurOptimization = true, // blur what is really under it (the cover), not the cached wallpaper
+                                       // the damage clip alone isn't enough: the blur pass draws the blurred
+                                       // background over the whole box unless clipRegion is set
+                                       .clipRegion = clip,
+                                   },
+                                   clip);
             },
             nullptr);
     }
