@@ -1092,7 +1092,7 @@ namespace {
         CBox     box;       // capture pixels
         int      round         = 0;
         float    roundingPower = 2.F;
-        int      layer         = 0; // 0 tiled, 1 floating, +2 on a special workspace, 4 pinned
+        int      layer         = 0; // stacking, see windowGeo
         bool     opaque        = false;
     };
 
@@ -1113,12 +1113,22 @@ namespace {
         g.box = zoomed(mon, CBox{g.pos.x, g.pos.y, std::max(g.size.x, 5.0), std::max(g.size.y, 5.0)}.translate(-mon->m_position).scale(mon->m_scale)).translate(-capturePos);
         if (g.box.w < 1 || g.box.h < 1)
             return std::nullopt;
-        const bool fullscreen = Fullscreen::controller() && Fullscreen::controller()->isFullscreen(w, Fullscreen::FSMODE_FULLSCREEN);
-        const bool dontRound  = capturePos != Vector2D{} || fullscreen;
-        g.round               = dontRound ? 0 : int(std::lround(windowRounding(w) * mon->m_scale * zoomScale(mon)));
-        g.roundingPower       = dontRound ? 2.F : windowRoundingPower(w);
-        // Hyprland draws pinned windows after the special workspace ("pinned always above")
-        g.layer               = windowPinned(w) ? 4 : (w->onSpecialWorkspace() ? 2 : 0) + (windowFloating(w) ? 1 : 0);
+        const auto& fsc        = Fullscreen::controller();
+        const bool  fullscreen = fsc && fsc->isFullscreen(w, Fullscreen::FSMODE_FULLSCREEN);
+        const bool  dontRound  = capturePos != Vector2D{} || fullscreen;
+        g.round                = dontRound ? 0 : int(std::lround(windowRounding(w) * mon->m_scale * zoomScale(mon)));
+        g.roundingPower        = dontRound ? 2.F : windowRoundingPower(w);
+        // Hyprland's order (renderWorkspaceWindows[Fullscreen]): tiled, floating, and on a
+        // workspace with a fullscreen window that window over both, with the floating
+        // windows that go over it (allowed there, or fading out under it) on top. The special
+        // workspace the same way over the regular one, pinned windows over everything.
+        const bool fsWorkspace = fsc && fsc->hasFullscreen(w->m_workspace);
+        int        stack       = windowFloating(w) ? 1 : 0;
+        if (fsWorkspace && fsc->isFullscreen(w))
+            stack = 2;
+        else if (fsWorkspace && stack == 1 && w->shouldRenderOverFullscreen())
+            stack = 3;
+        g.layer = windowPinned(w) ? 8 : (w->onSpecialWorkspace() ? 4 : 0) + stack;
         // Hyprland's opaque() ignores the layout alpha: a group tab or monocle window that
         // is fading out on a switch would still count as opaque and cut the cover below it
         g.opaque              = fade >= 1.F && windowOpaque(w);
@@ -1205,8 +1215,8 @@ namespace {
         const auto capturePos = frame->m_session->m_captureBox.pos();
         const auto now        = std::chrono::steady_clock::now();
 
-        // Windows drawn on top of others: later in the stack (pinned over everything, a
-        // special workspace over the regular one, floating over tiled, then list order).
+        // Windows drawn on top of others: later in Hyprland's stacking (see windowGeo), then
+        // in list order.
         // A cover is only drawn where its window is actually visible, so an opaque window
         // placed over a hidden one stays visible. Layers (bars) are left alone: they are
         // often translucent and we can't tell.
