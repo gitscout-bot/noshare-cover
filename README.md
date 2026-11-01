@@ -244,6 +244,11 @@ No trailing `/` in the URL: with it hyprpm can't derive the repository name and 
 plugin outside its own directory. hyprpm builds against the running Hyprland and loads the
 plugin itself. Do not also call `hl.plugin.load`.
 
+The first build compiles everything (most of it is the AV1 decoder's assembly). hyprpm keeps
+cargo's build directory in `~/.cache/noshare-cover/target` (~500 MB), so the rebuild after a
+Hyprland update compiles only this repository's crates and the C++ part, about a fifth of the
+first build. Delete the directory to free the space; the next build starts from scratch.
+
 ### Arch
 
 `packaging/arch/PKGBUILD` (`makepkg -si`). Rebuild it after every `hyprland` update: a plugin

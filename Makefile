@@ -2,7 +2,11 @@ PLUGIN   := noshare-cover
 prefix   ?= /usr/local
 CARGO    ?= cargo
 
-RUST_LIB := target/release/libnoshare_cover.a
+# Cargo's target directory: `target` here, or $(CARGO_TARGET_DIR) if set. hyprpm sets it
+# outside its throwaway clone (hyprpm.toml): the Rust core doesn't use Hyprland's headers,
+# so a rebuild after a Hyprland update reuses every compiled dependency.
+TARGET   := $(or $(CARGO_TARGET_DIR),target)
+RUST_LIB := $(TARGET)/release/libnoshare_cover.a
 RUST_SRC := Cargo.toml Cargo.lock build.rs $(shell find src -name '*.rs')
 # VA-API helper: a separate .so with libva/libgbm, embedded into the plugin (see
 # src/media/video/decode/vaapi.rs). NSC_VAAPI=0 builds without VA-API (then libva
@@ -36,7 +40,7 @@ endif
 ifneq ($(strip $(MISSING)),)
 $(error noshare-cover: missing build dependencies: $(strip $(MISSING)). Arch: sudo pacman -S --needed rust pkgconf nasm libva mesa. Without VA-API: make NSC_VAAPI=0)
 endif
-HELPER   := target/release/libnoshare_cover_vaapi.so
+HELPER   := $(TARGET)/release/libnoshare_cover_vaapi.so
 HELPER_SRC := vaapi-helper/Cargo.toml $(shell find vaapi-helper/src vendor -name '*.rs')
 
 # No ffmpeg/cairo/libjpeg/giflib: all media handling lives in the Rust core.
