@@ -41,7 +41,7 @@
 hl.config({
     plugin = {
         no_screen_share_cover = {
-            -- png, jpg, jpeg, gif, mp4, m4v, mov, webm, mkv
+            -- png, jpg, jpeg, gif, mp4, m4v, mov, webm, mkv или "transparent" (см. ниже)
             path_cover = "~/.config/hypr/noshare-cover.gif",
             loop = true,
             speed = 1.0,
@@ -87,6 +87,24 @@ hl.layer_rule({
     no_screen_share_cover = "~/.config/hypr/NoCover/bar.png",
 })
 ```
+
+Вместо медиа окну или слою можно задать `"transparent"`: его просто нет в захвате, будто его и
+не было, и в стриме видно то, что под ним (скрытое окно под ним остаётся под своей обложкой). Это
+для уведомлений, OSD и прочих всплывашек, которых в стриме быть не должно вовсе:
+
+```lua
+hl.layer_rule({
+    match = { namespace = "notifications" },
+    no_screen_share = true,
+    no_screen_share_cover = "transparent",
+})
+```
+
+`path_cover = "transparent"` делает так со всеми скрытыми поверхностями без своей обложки.
+`show_to` и `hide_from` работают так же, как для обложек, анимация закрытия тоже пропадает из
+захвата. Пока такая поверхность есть на захватываемом мониторе, каждый кадр захвата рисует этот
+монитор ещё раз без неё: это один лишний рендер монитора на кадр захвата, а когда её нет, ничего.
+Нужен Hyprland 0.57 или новее; на старых версиях такая поверхность получает чёрный бокс.
 
 Имена полей из исходного плагина (`["no_screen_share_cover:path_cover"]`, `[":speed"]`,
 `[":loop"]`) тоже работают.
