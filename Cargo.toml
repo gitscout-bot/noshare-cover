@@ -35,7 +35,10 @@ cpu-vpx = ["dep:libloading"]
 gif = "0.13"
 libc = { version = "0.2", optional = true }
 libloading = { version = "0.8", optional = true }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Covers: PNG and JPEG straight from their decoders. The image crate on top of them
+# would pull in ICC color management (moxcms), half of the plugin's build time.
+png = "0.18"
+zune-jpeg = "0.5"
 matroska-demuxer = "0.8.1"
 re_mp4 = "0.4.0"
 # AV1 on CPU: dav1d in Rust, asm kernels via nasm (x86_64) / gas (aarch64)
