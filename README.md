@@ -40,7 +40,8 @@ otherwise the cover would stall on a static monitor.
 hl.config({
     plugin = {
         no_screen_share_cover = {
-            -- png, jpg, jpeg, gif, mp4, m4v, mov, webm, mkv, or "transparent" (see below)
+            -- png, jpg, jpeg, gif, mp4, m4v, mov, webm, mkv,
+            -- or "transparent", "blur", "pixelate" (see below)
             path_cover = "~/.config/hypr/noshare-cover.gif",
             loop = true,
             speed = 1.0,
@@ -54,6 +55,8 @@ hl.config({
             show_to = "",
             -- if set, hide only from these clients; everyone else sees everything
             hide_from = "",
+            -- keep the cursor visible over covers when the capture shows it
+            cursor_over_covers = true,
         },
     },
 })
@@ -103,7 +106,22 @@ hl.layer_rule({
 `show_to` and `hide_from` apply as they do to covers, and the close animation is left out too.
 While such a surface is on a captured monitor, every capture frame draws that monitor once more
 without it, so it costs one extra render of the monitor per captured frame, and nothing when
-there is none. This needs Hyprland 0.57 or newer; older versions give it the black box.
+there is none.
+
+`"blur"` and `"pixelate"` show the surface's own picture, blurred or pixelated, so the stream
+sees that something is there but not what. A number sets the strength in capture pixels: the
+size of the blur (`"blur 40"`, default 24) or the block size (`"pixelate 32"`, default 20). Each
+block is the average of the pixels under it. Menus and tooltips of such a window get the same
+effect. Small text needs a strong enough setting to stay unreadable; a blurred or pixelated
+picture still shows shapes and colors.
+
+`"transparent"`, `"blur"` and `"pixelate"` need Hyprland 0.57 or newer; older versions give
+the surface the black box.
+
+A software cursor (`cursor:no_hardware_cursors`, which is usual on NVIDIA) is drawn into the
+picture of the monitor, so a cover over a window used to hide the cursor too. It is drawn again
+over the covers now; `cursor_over_covers = false` turns that off. A hardware cursor that the
+capture asked for was always on top. Needs Hyprland 0.57 or newer.
 
 The field names of the original plugin (`["no_screen_share_cover:path_cover"]`,
 `[":speed"]`, `[":loop"]`) still work.
