@@ -17,6 +17,7 @@ pub mod gpu;
 pub mod media;
 pub mod notify;
 pub mod registry;
+pub mod worker;
 
 pub use config::{Backend, PlayParams, Settings};
 pub use frame::{Frame, FrameData};

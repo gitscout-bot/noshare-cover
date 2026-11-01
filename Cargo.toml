@@ -23,9 +23,9 @@ default = ["nvdec", "vaapi", "cpu-av1", "cpu-h264", "cpu-vpx"]
 nvdec = ["dep:libloading"]
 # Intel/AMD (and NVIDIA via nvidia-vaapi-driver): VA-API. The decoder itself lives in
 # vaapi-helper (embedded by the Makefile, loaded from a memfd)
-vaapi = ["dep:libloading", "dep:libc"]
+vaapi = ["dep:libloading"]
 # software fallbacks
-cpu-av1 = ["dep:rav1d", "dep:libc"]
+cpu-av1 = ["dep:rav1d"]
 # H.264 on CPU: system libopenh264, dlopen-ed on the first video
 cpu-h264 = ["dep:libloading"]
 # VP8/VP9 on CPU: system libvpx via dlopen
@@ -33,7 +33,7 @@ cpu-vpx = ["dep:libloading"]
 
 [dependencies]
 gif = "0.13"
-libc = { version = "0.2", optional = true }
+libc = "0.2"
 libloading = { version = "0.8", optional = true }
 # Covers: PNG and JPEG straight from their decoders. The image crate on top of them
 # would pull in ICC color management (moxcms), half of the plugin's build time.

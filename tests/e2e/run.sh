@@ -157,6 +157,8 @@ echo "== final"
 hctl plugin unload "$PLUGIN" >/dev/null
 sleep 0.5
 [ -n "$(hypr_pid)" ] && pass "final unload is clean" || fail "Hyprland crashed on unload"
+# otherwise every update leaves a copy behind, and loading the same path again gets the old code
+grep -q "$PLUGIN" "/proc/$(hypr_pid)/maps" && fail "the plugin is still mapped after unload" || pass "the plugin is gone from memory after unload"
 pkill -xu "$(id -u)" Hyprland; sleep 1
 grep -qiE "Hyprland has crashed|SIGSEGV|SIGABRT|signal 11|core dumped|plugin .* crashed" "$WORK/hypr.log" && fail "Hyprland log shows crashes" || pass "no crashes in Hyprland log"
 
