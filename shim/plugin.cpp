@@ -62,14 +62,8 @@
 #include "desktop/view/Popup.hpp"
 #include "desktop/view/WLSurface.hpp"
 #include "desktop/state/WindowState.hpp"
-// main (0.57-dev) split the window into Window + WindowPresentation; release 0.56 still has a single class.
-#if __has_include("desktop/view/window/Window.hpp")
 #include "desktop/view/window/Window.hpp"
 #include "desktop/view/window/WindowPresentation.hpp"
-#define NSC_SPLIT_WINDOW 1
-#else
-#include "desktop/view/Window.hpp"
-#endif
 #include "event/EventBus.hpp"
 #include "managers/eventLoop/EventLoopManager.hpp"
 #include "managers/eventLoop/EventLoopTimer.hpp"
@@ -82,14 +76,10 @@
 #include "protocols/types/Buffer.hpp"
 #include "render/Framebuffer.hpp"
 #include "render/Renderer.hpp"
-// 0.57: the render state is passed around explicitly (see RenderCtx)
-#if __has_include("render/Context.hpp")
 #include "managers/SessionLockManager.hpp"
 #include "pointer/PointerManager.hpp"
 #include "render/Context.hpp"
 #include "render/scene/MonitorScene.hpp"
-#define NSC_RENDER_CONTEXT 1
-#endif
 #include "render/pass/ClearPassElement.hpp"
 #include "render/pass/RectPassElement.hpp"
 #include "render/pass/TexPassElement.hpp"
@@ -107,147 +97,36 @@
 
 namespace {
 
-    // Window API differences between release and main are confined to this block.
-    // Members that moved between Hyprland versions. `requires` on a template parameter
-    // lets the compiler pick whatever exists in the headers we build against.
-    template <class W>
-    std::string windowClass(const W& w) {
-        if constexpr (requires { w->m_class; })
-            return w->m_class; // 0.56
-        else
-            return std::string{w->metadata().appID()}; // main
+    std::string windowClass(const PHLWINDOW& w) {
+        return std::string{w->metadata().appID()};
     }
 
-    // layers and popups
+    // layers and popups, as ScreenshareFrame checks them
     template <class V>
     bool viewVisible(const V& v) {
-        if constexpr (requires { v->visible(); })
-            return v->visible(); // 0.56
-        else
-            return v->mapped() && v->acceptsInput() && v->alphaNonZero(); // main, as ScreenshareFrame does
-    }
-
-    template <class V>
-    SP<Desktop::View::CPopup> popupHeadOf(const V& v) {
-        if constexpr (requires { v->popupHead(); })
-            return v->popupHead(); // main
-        else
-            return v->m_popupHead; // 0.56
-    }
-
-    // fully opaque: nothing below shows through it (alpha rules, transparent terminals...)
-    template <class W>
-    bool windowOpaque(const W& w) {
-        if constexpr (requires { w->presentation().opaque(); })
-            return w->presentation().opaque(); // main
-        else
-            return w->opaque(); // 0.56
-    }
-
-    template <class W>
-    bool windowFloating(const W& w) {
-        if constexpr (requires { w->m_isFloating; })
-            return w->m_isFloating; // 0.56
-        else
-            return w->isFloating(); // main
-    }
-
-    template <class W>
-    bool windowIsX11(const W& w) {
-        if constexpr (requires { w->m_isX11; })
-            return w->m_isX11; // 0.56
-        else
-            return w->backend().isX11(); // main
+        return v->mapped() && v->acceptsInput() && v->alphaNonZero();
     }
 
     // top-left of the client's own geometry inside its surface (popups are relative to it)
-    template <class W>
-    std::optional<Vector2D> windowClientGeometryPos(const W& w) {
-        if constexpr (requires { w->m_xdgSurface; }) {
-            if (!w->m_xdgSurface)
-                return std::nullopt;
-            return w->m_xdgSurface->m_current.geometry.pos(); // 0.56
-        } else
-            return w->backend().geometry().box.pos(); // main
-    }
-
-    template <class W>
-    bool windowMapped(const W& w) {
-        if constexpr (requires { w->mapped(); })
-            return w->mapped(); // main
-        else
-            return w->m_isMapped; // 0.56
+    Vector2D windowClientGeometryPos(const PHLWINDOW& w) {
+        return w->backend().geometry().box.pos();
     }
 
     // the layout alpha is how a group hides its inactive tabs
     float windowFade(const PHLWINDOW& w) {
-#ifdef NSC_SPLIT_WINDOW
         return w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) *
             w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_LAYOUT);
-#else
-        return w->alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * w->alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) *
-            w->alphaValue(Desktop::View::WINDOW_ALPHA_LAYOUT);
-#endif
     }
 
     // everything that makes the window translucent as a whole: fade, fullscreen, opacity rules
     float windowAlpha(const PHLWINDOW& w) {
-#ifdef NSC_SPLIT_WINDOW
         return windowFade(w) * w->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_ACTIVE);
-#else
-        return windowFade(w) * w->alphaValue(Desktop::View::WINDOW_ALPHA_ACTIVE);
-#endif
     }
 
     bool windowPinned(const PHLWINDOW& w) {
-#ifdef NSC_SPLIT_WINDOW
         return static_cast<bool>(w->m_state & Desktop::View::WINDOW_STATE_PINNED);
-#else
-        return w->m_pinned;
-#endif
     }
 
-    float windowRounding(const PHLWINDOW& w) {
-#ifdef NSC_SPLIT_WINDOW
-        return w->presentation().rounding();
-#else
-        return w->rounding();
-#endif
-    }
-
-    float windowRoundingPower(const PHLWINDOW& w) {
-#ifdef NSC_SPLIT_WINDOW
-        return w->presentation().roundingPower();
-#else
-        return w->roundingPower();
-#endif
-    }
-
-    // The render state of the frame being drawn. 0.57 hands it to the screencast frame,
-    // the zoom transform and every draw call; 0.56 keeps it in the renderer, so there
-    // it's an empty tag and the helpers below go to g_pHyprRenderer.
-#ifdef NSC_RENDER_CONTEXT
-    using RenderCtx = Render::CRenderContext;
-#else
-    struct RenderCtx {};
-#endif
-
-    Render::SRenderData& renderData(RenderCtx& ctx) {
-#ifdef NSC_RENDER_CONTEXT
-        return ctx.m_data;
-#else
-        return g_pHyprRenderer->m_renderData;
-#endif
-    }
-
-    template <class T>
-    void drawElement(RenderCtx& ctx, const T& data, const CRegion& damage) {
-#ifdef NSC_RENDER_CONTEXT
-        g_pHyprRenderer->draw(ctx, data, damage);
-#else
-        g_pHyprRenderer->draw(data, damage);
-#endif
-    }
 
     HANDLE         g_handle = nullptr;
     // push settings to the core right after every config reload, not on the first
@@ -483,15 +362,6 @@ namespace {
         return coverKind(rules).kind == SCoverKind::TRANSPARENT;
     }
 
-    // Before 0.57 (no render context, no capture scenes) the words only get the black box.
-    void kindUnsupported() {
-#ifndef NSC_RENDER_CONTEXT
-        static bool told = false;
-        if (!std::exchange(told, true))
-            notify("noshare-cover: \"transparent\", \"blur\" and \"pixelate\" covers need Hyprland 0.57 or newer, the surface gets the black box", 10000);
-#endif
-    }
-
     // Cursor zoom (cursor:zoom_factor). The screencast copies the monitor image after
     // the zoom, but Hyprland's no_screen_share boxes (and, before this, our covers) use
     // unzoomed coordinates, so under zoom they miss the windows. Hyprland computes the
@@ -517,7 +387,6 @@ namespace {
     }
 
     // Only the normal monitor render feeds the screencast.
-#ifdef NSC_RENDER_CONTEXT
     using ApplyZoomFn = void (*)(Monitor::CMonitorZoomController*, Render::CRenderContext&, CBox&);
 
     void hkApplyZoom(Monitor::CMonitorZoomController* self, Render::CRenderContext& ctx, CBox& monbox) {
@@ -525,24 +394,6 @@ namespace {
         if (const auto mon = ctx.m_data.pMonitor.lock(); mon && ctx.m_mode == Render::RENDER_MODE_NORMAL)
             recordZoom(mon, monbox);
     }
-#else
-    using ApplyZoomFn = void (*)(Monitor::CMonitorZoomController*, CBox&, const Render::SRenderData&);
-
-    // m_renderMode is protected in some releases; there we can't tell and take every call.
-    template <class R>
-    bool normalRender(const R* r) {
-        if constexpr (requires { r->m_renderMode; })
-            return r->m_renderMode == Render::RENDER_MODE_NORMAL;
-        else
-            return true;
-    }
-
-    void hkApplyZoom(Monitor::CMonitorZoomController* self, CBox& monbox, const Render::SRenderData& rd) {
-        reinterpret_cast<ApplyZoomFn>(g_zoomHook->m_original)(self, monbox, rd);
-        if (const auto mon = rd.pMonitor.lock(); mon && normalRender(g_pHyprRenderer.get()))
-            recordZoom(mon, monbox);
-    }
-#endif
 
     // Unzoomed monitor pixel box -> where it ends up in the screencast image.
     CBox zoomed(const PHLMONITOR& mon, const CBox& b) {
@@ -605,13 +456,12 @@ namespace {
     CRegion g_painted;
 
     // clip: where drawing is allowed (the draw is scissored to it); empty = the whole box
-    void drawBlack(RenderCtx& ctx, const CBox& box, int round = 0, float roundingPower = 2.F, const CRegion& clip = {}) {
+    void drawBlack(Render::CRenderContext& ctx, const CBox& box, int round = 0, float roundingPower = 2.F, const CRegion& clip = {}) {
         const CRegion area = clip.empty() ? CRegion{box} : clip;
         g_painted.add(area);
-        drawElement(ctx, CRectPassElement::SRectData{.box = box, .color = CHyprColor{0.F, 0.F, 0.F, 1.F}, .round = round, .roundingPower = roundingPower}, area);
+        g_pHyprRenderer->draw(ctx, CRectPassElement::SRectData{.box = box, .color = CHyprColor{0.F, 0.F, 0.F, 1.F}, .round = round, .roundingPower = roundingPower}, area);
     }
 
-#ifdef NSC_RENDER_CONTEXT
     // drawEffect's intermediate buffers by size, dropped after a while unused (pruneTextures)
     struct SFxBuffer {
         SP<Render::IFramebuffer> fb;
@@ -629,16 +479,14 @@ namespace {
         b.used = g_frameCount;
         return b.fb;
     }
-#endif
 
     // Blur or pixelate what the frame shows at box, taken from the image Hyprland draws the
     // frame from (see renderMonitorWithCovers), and draw it back there, only within clip.
     // The picture is halved with linear filtering, which averages 2x2 pixels, until one
     // pixel stands for `amount`; pixelate scales that up with nearest neighbour (blocks),
     // blur goes back up through the same sizes with linear filtering (smooth).
-    bool drawEffect(RenderCtx& ctx, const SP<Render::ITexture>& image, const SCoverKind& kind, const CBox& box, const Vector2D& capturePos, int round, float roundingPower,
+    bool drawEffect(Render::CRenderContext& ctx, const SP<Render::ITexture>& image, const SCoverKind& kind, const CBox& box, const Vector2D& capturePos, int round, float roundingPower,
                     const CRegion& clip) {
-#ifdef NSC_RENDER_CONTEXT
         if (!image || box.w < 1 || box.h < 1)
             return false;
         const CBox     src = box.copy().translate(capturePos); // in the image
@@ -671,25 +519,22 @@ namespace {
                 g_pHyprRenderer->setProjectionType(ctx, Render::RPT_EXPORT);
                 g_pHyprRenderer->setViewport(0, 0, size.x, size.y);
                 const double sx = size.x / from.w, sy = size.y / from.h;
-                drawElement(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 1.F}}, all); // beyond the image (off screen)
-                drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = {-from.x * sx, -from.y * sy, tex->m_size.x * sx, tex->m_size.y * sy}}, all);
+                g_pHyprRenderer->draw(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 1.F}}, all); // beyond the image (off screen)
+                g_pHyprRenderer->draw(ctx, CTexPassElement::SRenderData{.tex = tex, .box = {-from.x * sx, -from.y * sy, tex->m_size.x * sx, tex->m_size.y * sy}}, all);
                 tex  = fb->getTexture();
                 from = CBox{{}, size};
             }
         }
         const bool nearest            = std::exchange(ctx.m_data.useNearestNeighbor, kind.kind == SCoverKind::PIXELATE);
         const Hyprutils::Utils::CScopeGuard restoreFilter{[&] { ctx.m_data.useNearestNeighbor = nearest; }};
-        drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = roundingPower}, clip);
+        g_pHyprRenderer->draw(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = roundingPower}, clip);
         return true;
-#else
-        return false;
-#endif
     }
 
     // One hidden surface's cover at box (capture pixels), only within clip (empty: the whole
     // box): its media, its own picture blurred or pixelated, or black when there is nothing
     // to show. what: the surface, for the trace.
-    void paintCover(RenderCtx& ctx, const SP<Render::ITexture>& image, const std::string& what, const SRuleValues& rules, const CBox& box, const Vector2D& capturePos, int round,
+    void paintCover(Render::CRenderContext& ctx, const SP<Render::ITexture>& image, const std::string& what, const SRuleValues& rules, const CBox& box, const Vector2D& capturePos, int round,
                     float roundingPower, const CRegion& clip = {}) {
         const auto    kind = coverKind(rules);
         const CRegion area = clip.empty() ? CRegion{box} : clip;
@@ -704,7 +549,7 @@ namespace {
                 if (const auto tex = nsc_resolve(&req, &f) ? textureFor(f) : nullptr) {
                     NSC_TRACE("%s: cover %ux%u at %.0f,%.0f %.0fx%.0f\n", what.c_str(), f.width, f.height, box.x, box.y, box.w, box.h);
                     g_painted.add(area);
-                    drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = roundingPower}, area);
+                    g_pHyprRenderer->draw(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round, .roundingPower = roundingPower}, area);
                     return;
                 }
                 NSC_TRACE("%s: no cover frame yet\n", what.c_str());
@@ -717,9 +562,8 @@ namespace {
                     g_painted.add(area);
                     return;
                 }
-                kindUnsupported();
                 break;
-            case SCoverKind::TRANSPARENT: kindUnsupported(); break; // and still in the image
+            case SCoverKind::TRANSPARENT: break; // and still in the image
         }
         drawBlack(ctx, box, round, roundingPower, area);
     }
@@ -727,9 +571,9 @@ namespace {
     // Popups (menus, tooltips) of a hidden window or layer: blurred or pixelated like it,
     // otherwise black like Hyprland does.
     template <class V>
-    void paintPopupBoxes(RenderCtx& ctx, const V& view, const Vector2D& baseOffset, const PHLMONITOR& mon, const Vector2D& capturePos, const SP<Render::ITexture>& image,
+    void paintPopupBoxes(Render::CRenderContext& ctx, const V& view, const Vector2D& baseOffset, const PHLMONITOR& mon, const Vector2D& capturePos, const SP<Render::ITexture>& image,
                          const SCoverKind& kind) {
-        const auto head = popupHeadOf(view);
+        const auto head = view->popupHead();
         if (!head)
             return;
         const bool effect = kind.kind == SCoverKind::BLUR || kind.kind == SCoverKind::PIXELATE;
@@ -944,7 +788,7 @@ namespace {
                 gone         = !l || !viewVisible(l);
             } else {
                 const auto w = last.win.lock();
-                gone         = !w || !windowMapped(w);
+                gone         = !w || !w->mapped();
             }
             if (m && gone) {
                 SClosing c{
@@ -1020,7 +864,7 @@ namespace {
         const auto  renderOffset = ws && !windowPinned(w) && ws->m_renderOffset ? ws->m_renderOffset->value() : Vector2D{};
         const auto  pos          = w->position(Desktop::View::IGeometric::GEOMETRIC_CURRENT) + renderOffset;
         const auto  size         = w->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT);
-        startClosing(false, reinterpret_cast<uintptr_t>(w.get()), w->m_monitor.lock(), CBox{pos, size}, ruleValuesFor(w), windowRounding(w), windowRoundingPower(w));
+        startClosing(false, reinterpret_cast<uintptr_t>(w.get()), w->m_monitor.lock(), CBox{pos, size}, ruleValuesFor(w), w->presentation().rounding(), w->presentation().roundingPower());
     }
 
     // Covers are opened on a loader thread, so the first capture of a new cover
@@ -1062,7 +906,7 @@ namespace {
     // (show_to / hide_from) get no closing cover: they see its fade-out as it is.
     // left: transparent surfaces were left out of this frame, their fade-outs too.
     // image: what Hyprland draws the frame from, for blur and pixelate.
-    CRegion paintClosing(RenderCtx& ctx, const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now, const SCaptureClient& client,
+    CRegion paintClosing(Render::CRenderContext& ctx, const PHLMONITOR& mon, const Vector2D& capturePos, std::chrono::steady_clock::time_point now, const SCaptureClient& client,
                          bool left, const SP<Render::ITexture>& image) {
         CRegion drawnArea;
         for (auto& c : g_closing) {
@@ -1123,13 +967,13 @@ namespace {
     // Draw a client surface's texture into box (its logical size), cropped to what the
     // client shows. Chromium keeps an oversized buffer and shows a viewporter crop of it:
     // drawn whole, the page shrank into a corner of the window and blur filled the rest.
-    void drawSurfaceTexture(RenderCtx& ctx, const SP<CWLSurfaceResource>& surf, CTexPassElement::SRenderData data, const CRegion& damage) {
+    void drawSurfaceTexture(Render::CRenderContext& ctx, const SP<CWLSurfaceResource>& surf, CTexPassElement::SRenderData data, const CRegion& damage) {
         const auto uv = viewportUV(surf);
         if (!uv) {
-            drawElement(ctx, data, damage);
+            g_pHyprRenderer->draw(ctx, data, damage);
             return;
         }
-        auto&                         rd          = renderData(ctx);
+        auto&                         rd          = ctx.m_data;
         const auto                    topLeft     = rd.primarySurfaceUVTopLeft;
         const auto                    bottomRight = rd.primarySurfaceUVBottomRight;
         Hyprutils::Utils::CScopeGuard restore{[&] {
@@ -1139,11 +983,11 @@ namespace {
         rd.primarySurfaceUVTopLeft     = uv->first;
         rd.primarySurfaceUVBottomRight = uv->second;
         data.allowCustomUV             = true;
-        drawElement(ctx, data, damage);
+        g_pHyprRenderer->draw(ctx, data, damage);
     }
 
     // Draw a layer again from its surface textures with its alpha, limited to clip.
-    void redrawLayer(RenderCtx& ctx, const PHLLS& l, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
+    void redrawLayer(Render::CRenderContext& ctx, const PHLLS& l, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
         const auto res = l->resource();
         if (!res)
             return;
@@ -1169,12 +1013,10 @@ namespace {
         if (++g_frameCount % 120 != 0)
             return;
         std::erase_if(g_textures, [](const auto& kv) { return !nsc_cover_alive(kv.first); });
-#ifdef NSC_RENDER_CONTEXT
         std::erase_if(g_fxBuffers, [](const auto& kv) { return kv.second.used + 120 < g_frameCount; });
-#endif
     }
 
-    void paintExtraRects(RenderCtx& ctx, const PHLMONITOR& mon, const Vector2D& capturePos) {
+    void paintExtraRects(Render::CRenderContext& ctx, const PHLMONITOR& mon, const Vector2D& capturePos) {
         // Usually a few dozen overlay tiles; if there are more, take as many as reported.
         std::vector<nsc_extra_rect> rects(64);
         size_t                      n = nsc_extra_rects(mon->m_id, rects.data(), rects.size());
@@ -1193,7 +1035,7 @@ namespace {
             if (r.fill == 1) {
                 if (const auto tex = coverForWindowAddress(r.window)) {
                     g_painted.add(box);
-                    drawElement(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round}, box);
+                    g_pHyprRenderer->draw(ctx, CTexPassElement::SRenderData{.tex = tex, .box = box, .round = round}, box);
                     continue;
                 }
             }
@@ -1283,14 +1125,14 @@ namespace {
         const auto& fsc        = Fullscreen::controller();
         const bool  fullscreen = fsc && fsc->isFullscreen(w, Fullscreen::FSMODE_FULLSCREEN);
         const bool  dontRound  = capturePos != Vector2D{} || fullscreen;
-        g.round                = dontRound ? 0 : int(std::lround(windowRounding(w) * mon->m_scale * zoomScale(mon)));
-        g.roundingPower        = dontRound ? 2.F : windowRoundingPower(w);
+        g.round                = dontRound ? 0 : int(std::lround(w->presentation().rounding() * mon->m_scale * zoomScale(mon)));
+        g.roundingPower        = dontRound ? 2.F : w->presentation().roundingPower();
         // Hyprland's order (renderWorkspaceWindows[Fullscreen]): tiled, floating, and on a
         // workspace with a fullscreen window that window over both, with the floating
         // windows that go over it (allowed there, or fading out under it) on top. The special
         // workspace the same way over the regular one, pinned windows over everything.
         const bool fsWorkspace = fsc && fsc->hasFullscreen(w->m_workspace);
-        int        stack       = windowFloating(w) ? 1 : 0;
+        int        stack       = w->isFloating() ? 1 : 0;
         if (fsWorkspace && fsc->isFullscreen(w))
             stack = 2;
         else if (fsWorkspace && stack == 1 && w->shouldRenderOverFullscreen())
@@ -1298,7 +1140,7 @@ namespace {
         g.layer = windowPinned(w) ? 8 : (w->onSpecialWorkspace() ? 4 : 0) + stack;
         // Hyprland's opaque() ignores the layout alpha: a group tab or monocle window that
         // is fading out on a switch would still count as opaque and cut the cover below it
-        g.opaque              = fade >= 1.F && windowOpaque(w);
+        g.opaque              = fade >= 1.F && w->presentation().opaque();
         return g;
     }
 
@@ -1313,17 +1155,13 @@ namespace {
     // Draw a window again from its surface textures, with its alpha, rounding and blur,
     // limited to clip. Used for translucent windows above a hidden one: the cover went
     // over them, and this puts them back on top of it.
-    void redrawWindow(RenderCtx& ctx, const PHLWINDOW& w, const SWinGeo& geo, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
+    void redrawWindow(Render::CRenderContext& ctx, const PHLWINDOW& w, const SWinGeo& geo, const CRegion& clip, const PHLMONITOR& mon, const Vector2D& capturePos) {
         const auto res = w->resource();
         if (!res)
             return;
         Vector2D base = geo.pos;
-        if (!windowIsX11(w)) {
-            const auto client = windowClientGeometryPos(w);
-            if (!client)
-                return;
-            base -= *client;
-        }
+        if (!w->backend().isX11())
+            base -= windowClientGeometryPos(w);
         static auto PBLUR = CConfigValue<Config::INTEGER>("decoration:blur:enabled");
         const bool  blur  = *PBLUR && !(w->m_ruleApplicator && w->m_ruleApplicator->noBlur().valueOrDefault());
         const float alpha = windowAlpha(w);
@@ -1362,13 +1200,13 @@ namespace {
     // left: surfaces with a transparent cover were left out of this frame's image (see
     // CSceneSwap), so nothing goes over them; otherwise they get the black box.
     // image: what Hyprland draws the frame from, for blur and pixelate.
-    void paintCovers(RenderCtx& ctx, Screenshare::CScreenshareFrame* frame, const SCaptureClient& client, const std::unordered_set<uintptr_t>& revealed, bool left,
+    void paintCovers(Render::CRenderContext& ctx, Screenshare::CScreenshareFrame* frame, const SCaptureClient& client, const std::unordered_set<uintptr_t>& revealed, bool left,
                      const SP<Render::ITexture>& image) {
         if (!frame || !frame->m_session || !g_pHyprRenderer) {
             NSC_TRACE("skip: frame %p session %d renderer %d\n", static_cast<void*>(frame), frame && frame->m_session ? 1 : 0, g_pHyprRenderer ? 1 : 0);
             return;
         }
-        const auto mon = renderData(ctx).pMonitor.lock();
+        const auto mon = ctx.m_data.pMonitor.lock();
         if (!mon) {
             NSC_TRACE("skip: no monitor in render data\n");
             return;
@@ -1445,8 +1283,8 @@ namespace {
                 .mon           = mon,
                 .box           = CBox{pos.x, pos.y, size.x, size.y},
                 .rules         = rules,
-                .rounding      = windowRounding(w),
-                .roundingPower = windowRoundingPower(w),
+                .rounding      = w->presentation().rounding(),
+                .roundingPower = w->presentation().roundingPower(),
                 .at            = now,
             };
             if (visible[i].gone)
@@ -1457,10 +1295,8 @@ namespace {
             if (clip.empty()) {
                 NSC_TRACE("window %s: fully under other windows\n", windowClass(w).c_str());
             }
-            if (!windowIsX11(w)) {
-                if (const auto geo = windowClientGeometryPos(w))
-                    paintPopupBoxes(ctx, w, pos - *geo, mon, capturePos, image, coverKind(rules));
-            }
+            if (!w->backend().isX11())
+                paintPopupBoxes(ctx, w, pos - windowClientGeometryPos(w), mon, capturePos, image, coverKind(rules));
             if (clip.empty())
                 continue;
             paintCover(ctx, image, "window " + windowClass(w), rules, box, capturePos, round, roundingPower, clip);
@@ -1753,7 +1589,7 @@ namespace {
             g_heldRules[key] = it->second.rules;
         };
         for (const auto& w : Desktop::windowState()->windows())
-            if (w && w->m_ruleApplicator && windowMapped(w))
+            if (w && w->m_ruleApplicator && w->mapped())
                 keep(reinterpret_cast<uintptr_t>(w.get()), w->m_ruleApplicator->noScreenShare());
         for (const auto& l : Desktop::layerState()->layers())
             if (l && l->m_ruleApplicator && viewVisible(l))
@@ -1763,7 +1599,6 @@ namespace {
         return out;
     }
 
-#ifdef NSC_RENDER_CONTEXT
     // Hidden surfaces on mon with a transparent cover that this client doesn't see (after
     // revealFor and holdUnhidden), and whether one of them is still closing.
     struct STransparentOn {
@@ -1871,7 +1706,7 @@ namespace {
             ctx.m_data.finalDamage = full;
             g_pHyprRenderer->setProjectionType(ctx, Render::RPT_MONITOR);
             g_pHyprRenderer->setViewport(0, 0, size.x, size.y);
-            drawElement(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, full);
+            g_pHyprRenderer->draw(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, full);
             {
                 // into a pass of its own: the frame's pass is drawn when the capture ends, over the covers
                 Render::CRenderPass pass;
@@ -1888,8 +1723,8 @@ namespace {
             if (out != fb) {
                 // the mirror image is taken after the cursor zoom (see recordZoom)
                 const auto boundOut = g_pHyprRenderer->bindTempFB(ctx, out);
-                drawElement(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, full);
-                drawElement(ctx, CTexPassElement::SRenderData{.tex = fb->getTexture(), .box = zoom->second.box}, full);
+                g_pHyprRenderer->draw(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, full);
+                g_pHyprRenderer->draw(ctx, CTexPassElement::SRenderData{.tex = fb->getTexture(), .box = zoom->second.box}, full);
             }
         }
         NSC_TRACE("scene: %s drawn without %zu transparent surface(s)\n", mon->m_name.c_str(), left.size());
@@ -1920,11 +1755,10 @@ namespace {
         ctx.m_data.noSimplify          = true;
         pass.render(ctx, g_painted);
     }
-#endif
 
     // original: Hyprland's renderMonitor for this frame
     template <class F>
-    void renderMonitorWithCovers(Screenshare::CScreenshareFrame* self, RenderCtx& ctx, const F& original) {
+    void renderMonitorWithCovers(Screenshare::CScreenshareFrame* self, Render::CRenderContext& ctx, const F& original) {
         NSC_TRACE("hook: renderMonitor\n");
         std::unordered_set<uintptr_t> revealedKeys;
         const SCaptureClient          client{.frame = self, .globalShow = cfgString(g_cfgShowTo), .globalHide = cfgString(g_cfgHideFrom)};
@@ -1940,7 +1774,6 @@ namespace {
         bool                 left = false;
         SP<Render::ITexture> image; // what Hyprland draws the frame from, for blur and pixelate
         {
-#ifdef NSC_RENDER_CONTEXT
             std::optional<CSceneSwap> scene;
             const auto                mon = ctx.m_data.pMonitor.lock();
             if (mon && self && self->m_session) {
@@ -1950,7 +1783,6 @@ namespace {
             }
             if (mon && !mon->resources().expired())
                 image = mon->resources()->getMirrorTexture(); // the scene, if it was swapped in
-#endif
             // Hyprland's boxes are always switched off and drawn by us: under zoom they land
             // in the wrong place, and they are drawn over everything, including windows that
             // sit on top of a hidden one.
@@ -1959,13 +1791,10 @@ namespace {
             original();
         }
         paintCovers(ctx, self, client, revealedKeys, left, image);
-#ifdef NSC_RENDER_CONTEXT
         if (const auto mon = ctx.m_data.pMonitor.lock(); mon && self && self->m_session)
             cursorOverCovers(ctx, mon, self->m_session->m_captureBox.pos());
-#endif
     }
 
-#ifdef NSC_RENDER_CONTEXT
     // A capture into a client's dmabuf (portal streams: Discord, OBS) renders straight into a
     // GL renderbuffer, which has no texture. Blur reads the render target, so under a
     // translucent window over a cover Hyprland fell back to its cached blur of the wallpaper.
@@ -1999,18 +1828,11 @@ namespace {
         const CRegion region{full};
         {
             const auto bound = g_pHyprRenderer->bindTempFB(ctx, off);
-            drawElement(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, region);
+            g_pHyprRenderer->draw(ctx, CClearPassElement::SClearData{{0.F, 0.F, 0.F, 0.F}}, region);
             renderMonitorWithCovers(self, ctx, original);
         }
-        drawElement(ctx, CTexPassElement::SRenderData{.tex = off->getTexture(), .box = full}, region);
+        g_pHyprRenderer->draw(ctx, CTexPassElement::SRenderData{.tex = off->getTexture(), .box = full}, region);
     }
-#else
-    void hkRenderMonitor(Screenshare::CScreenshareFrame* self) {
-        using Fn = void (*)(Screenshare::CScreenshareFrame*);
-        RenderCtx ctx;
-        renderMonitorWithCovers(self, ctx, [&] { reinterpret_cast<Fn>(g_hook->m_original)(self); });
-    }
-#endif
 
     template <typename T, typename... Args>
     SP<T> makeValue(const char* name, const char* desc, Args&&... def) {
@@ -2105,12 +1927,10 @@ namespace {
             g_zoomHook = nullptr;
         }
         g_zoom.clear();
-#ifdef NSC_RENDER_CONTEXT
         g_offscreen.reset();
         g_sceneFB.reset();
         g_sceneZoomFB.reset();
         g_fxBuffers.clear();
-#endif
         // API clients (gloview) drop our pointers and may take over renderMonitor.
         nsc_api_notify_gone();
         g_textures.clear();

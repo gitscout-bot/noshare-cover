@@ -9,11 +9,12 @@ Version 2.0 is a rewrite: the core is Rust (media, decoding, playback clock, lif
 public API), and a thin C++ layer talks to Hyprland's C++ plugin API. No FFmpeg, no cairo,
 no external processes.
 
-> **Status.** Works end to end on a live Hyprland (0.56.2 on llvmpipe and 0.57.0, Arch): a window with
+> **Status.** Works end to end on a live Hyprland 0.57 (Arch): a window with
 > `no_screen_share` shows the cover in a `grim` capture — still image, GIF, H.264, AV1, VP9 —
 > and survives repeated `hyprctl plugin unload/load` without thread or memory growth
-> (`tests/e2e/run.sh`). Builds with Nix against Hyprland 0.56.0 and 0.56.2 from nixpkgs and
-> with makepkg on Arch. VA-API decoding was run on an AMD iGPU (radeonsi: H.264, VP9, AV1);
+> (`tests/e2e/run.sh`). Builds with Nix against Hyprland 0.57.0 (the hyprwm flake and nixpkgs)
+> and with makepkg on Arch. Hyprland 0.56 is no longer supported; on it hyprpm builds the last
+> version that is (pinned in `hyprpm.toml`). VA-API decoding was run on an AMD iGPU (radeonsi: H.264, VP9, AV1);
 > for NVDEC see [Checking the GPU path](#checking-the-gpu-path).
 
 ## Video decoding
@@ -115,13 +116,10 @@ block is the average of the pixels under it. Menus and tooltips of such a window
 effect. Small text needs a strong enough setting to stay unreadable; a blurred or pixelated
 picture still shows shapes and colors.
 
-`"transparent"`, `"blur"` and `"pixelate"` need Hyprland 0.57 or newer; older versions give
-the surface the black box.
-
 A software cursor (`cursor:no_hardware_cursors`, which is usual on NVIDIA) is drawn into the
 picture of the monitor, so a cover over a window used to hide the cursor too. It is drawn again
 over the covers now; `cursor_over_covers = false` turns that off. A hardware cursor that the
-capture asked for was always on top. Needs Hyprland 0.57 or newer.
+capture asked for was always on top.
 
 The field names of the original plugin (`["no_screen_share_cover:path_cover"]`,
 `[":speed"]`, `[":loop"]`) still work.

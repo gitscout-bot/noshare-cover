@@ -107,11 +107,11 @@ back and never has to keep a dlopen handle that would pin noshare-cover in memor
 | MP4/MOV, WebM/MKV demuxers | ✅ tests on real files |
 | CPU: AV1 (rav1d), H.264 (openh264), VP8/VP9 (libvpx), YUV→BGRA | ✅ tests on real files + live Hyprland |
 | NVDEC (dlopen, driver parser, NV12/P016 copy) | ⚠️ builds, struct layouts checked against ffnvcodec-headers; not run on a GPU |
-| VA-API (vaapi-helper on cros-codecs, embedded, loaded from memfd) | ⚠️ builds, helper loading checked; not run on a GPU; 8-bit only |
-| `shim/plugin.cpp` (0.56.x and 0.57.x) | ✅ builds against 0.56.0/0.56.2/0.57.0, runs on 0.56.2 and 0.57.0 |
+| VA-API (vaapi-helper on cros-codecs, embedded, loaded from memfd) | ✅ H.264, VP9, AV1 on an AMD iGPU (radeonsi), tests with `NSC_TEST_GPU`; 8-bit only |
+| `shim/plugin.cpp` (0.57.x) | ✅ builds and runs on 0.57.0 |
 | Together with gloview | ✅ `tests/e2e/with-gloview.sh`: both load orders, unload/reload, overview tiles |
 | Unload/load, leaks | ✅ `tests/e2e/run.sh`: 8 cycles, threads and RSS stable |
-| Packaging: hyprpm, Arch PKGBUILD, Nix flake | ✅ makepkg and nix build (0.56.0, 0.56.2) |
+| Packaging: hyprpm, Arch PKGBUILD, Nix flake | ✅ makepkg; nix build against 0.57.0 in CI; hyprpm pins 0.56.x to the last version that supports it |
 
 ## What to check on a real machine
 
