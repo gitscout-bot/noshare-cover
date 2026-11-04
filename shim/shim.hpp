@@ -247,9 +247,10 @@ namespace nsc {
     // other hidden window is drawn as it is, with its border and shadow, and gets its
     // cover afterwards as usual. The result stands in for the mirror's texture while this
     // lives, so Hyprland's own copy (region, scale, cursor) takes it as it takes the mirror.
+    // A software cursor goes into the scene only for a capture that asked for the cursor.
     class CSceneSwap {
       public:
-        CSceneSwap(Render::CRenderContext& ctx, const PHLMONITOR& mon, const std::unordered_set<uintptr_t>& left);
+        CSceneSwap(Render::CRenderContext& ctx, const PHLMONITOR& mon, const std::unordered_set<uintptr_t>& left, bool cursor);
         ~CSceneSwap();
         CSceneSwap(const CSceneSwap&)            = delete;
         CSceneSwap& operator=(const CSceneSwap&) = delete;
@@ -303,7 +304,7 @@ namespace nsc {
 
     // scene.cpp
     STransparentOn transparentOn(const PHLMONITOR& mon, const Vector2D& capturePos, const SCaptureClient& client);
-    void cursorOverCovers(Render::CRenderContext& ctx, const PHLMONITOR& mon, const Vector2D& capturePos);
+    void cursorOverCovers(Render::CRenderContext& ctx, const PHLMONITOR& mon, const Vector2D& capturePos, bool cursor);
     void releaseScene();
 
     // paint.cpp

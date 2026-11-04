@@ -232,7 +232,7 @@ namespace nsc {
                 if (mon && self && self->m_session) {
                     const auto gone = transparentOn(mon, self->m_session->m_captureBox.pos(), client);
                     if (!gone.keys.empty() || gone.closing)
-                        left = scene.emplace(ctx, mon, gone.keys).drawn();
+                        left = scene.emplace(ctx, mon, gone.keys, self->m_overlayCursor).drawn();
                 }
                 if (mon && !mon->resources().expired())
                     image = mon->resources()->getMirrorTexture(); // the scene, if it was swapped in
@@ -245,7 +245,7 @@ namespace nsc {
             }
             paintCovers(ctx, self, client, revealedKeys, left, image);
             if (const auto mon = ctx.m_data.pMonitor.lock(); mon && self && self->m_session)
-                cursorOverCovers(ctx, mon, self->m_session->m_captureBox.pos());
+                cursorOverCovers(ctx, mon, self->m_session->m_captureBox.pos(), self->m_overlayCursor);
         }
 
         // A capture into a client's dmabuf (portal streams: Discord, OBS) renders straight into a

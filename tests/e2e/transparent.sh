@@ -22,7 +22,7 @@ fail() { printf '  \e[31mFAIL\e[0m %s\n' "$*"; FAILS=$((FAILS + 1)); }
 magick -size 640x360 pattern:verticalbricks -fill red -opaque black -fill '#2040ff' -opaque white "$WORK/cover.png"
 GONE='#ff00ff' # the transparent surfaces' color, must never reach a capture
 
-write_config() { # $1: path_cover, $2: zoom factor, $3: blur (true/false)
+write_config() { # $1: path_cover, $2: zoom factor, $3: blur (true/false), $4: no_hardware_cursors (optional)
     cat > "$WORK/hypr.lua" <<LUA
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = "1" })
 hl.plugin.load("$PLUGIN")
@@ -30,7 +30,7 @@ hl.config({
     plugin = { no_screen_share_cover = { path_cover = "$1" } },
     general = { gaps_in = 0, gaps_out = 0, border_size = 0, layout = "dwindle" },
     decoration = { rounding = 0, shadow = { enabled = false }, blur = { enabled = ${3:-false}, ignore_opacity = true } },
-    cursor = { zoom_factor = $2 },
+    cursor = { zoom_factor = $2${4:+, no_hardware_cursors = $4} },
     animations = { enabled = true },
     misc = { disable_hyprland_logo = true, disable_splash_rendering = true },
     debug = { suppress_errors = true },
@@ -186,6 +186,71 @@ kill "$(win_pid gone-me)"
 sleep 2
 shot blur-after
 check_frame "under a blurred translucent window" blur blur-after
+
+echo "== software cursor (no_hardware_cursors = 1)"
+# A capture gets the cursor only when it asks for it (grim -c): in the transparent scene
+# and over covers the software cursor must not be drawn into a capture without it.
+write_config "$WORK/cover.png" 1 false 1
+start_hyprland
+open_win plain
+open_win cover-me
+read -r MW MH <<<"$(hctl monitors -j | jq -r '.[0] | "\(.width) \(.height)"')"
+park() { hctl dispatch "hl.dsp.cursor.move({ x = $((MW * 3 / 4)), y = $((MH - 120)) })" >/dev/null; sleep 0.5; } # over the plain window, far from the targets
+point() { hctl dispatch "hl.dsp.cursor.move({ x = $1, y = $2 })" >/dev/null; sleep 0.5; }
+cursor_px() { # $1 shot, $2 reference, $3 $4 pointer: "<count> <bbox>" of the pixels that differ in a 128x128 box around it
+    magick "$WORK/$2.png" "$WORK/$1.png" -crop "128x128+$(($3 - 64))+$(($4 - 64))" +repage -compose difference -composite \
+        -colorspace gray -threshold 6% -format '%[fx:int(mean*w*h+0.5)] %@' info: 2>/dev/null # no bbox when nothing differs
+}
+check_cursor() { # $1 label, $2 reference, $3 $4 pointer; takes both shots there
+    local n box w h
+    grim "$WORK/nocursor.png"
+    grim -c "$WORK/withcursor.png"
+    read -r n box <<<"$(cursor_px nocursor "$2" "$3" "$4")"
+    [ "$n" -eq 0 ] && pass "$1: no cursor in a capture without it" || fail "$1: $n cursor pixels in a capture without it ($WORK/nocursor.png)"
+    read -r n box <<<"$(cursor_px withcursor "$2" "$3" "$4")"
+    IFS='x+' read -r w h _ <<<"$box"
+    [ "$n" -gt 0 ] && [ "$w" -le 64 ] && [ "$h" -le 64 ] && pass "$1: one cursor with grim -c ($n px in $box)" \
+        || fail "$1: not exactly one cursor with grim -c ($n px in $box, $WORK/withcursor.png)"
+}
+
+park
+shot ref-cursor
+IFS='x+' read -r w h x y <<<"$(win_box cover-me)"
+point $((x + w / 2)) $((y + h / 2))
+check_cursor "cursor over a media cover" ref-cursor $((x + w / 2)) $((y + h / 2))
+
+if command -v quickshell >/dev/null; then
+    quickshell -p "$WORK/qs/shell.qml" > "$WORK/qs-cursor.log" 2>&1 &
+    QS=$!
+    for _ in $(seq 40); do sleep 0.25; hctl layers -j | grep -q nsc-gone && break; done
+    sleep 1
+    c=$(hctl layers -j | jq -r '[.. | objects | select(.namespace? == "nsc-gone")][0] // empty | "\(.x + (.w / 2 | floor)) \(.y + (.h / 2 | floor))"')
+    if [ -n "$c" ]; then
+        read -r cx cy <<<"$c"
+        park
+        shot ref-cursor-layer
+        point "$cx" "$cy"
+        check_cursor "cursor over a transparent layer" ref-cursor-layer "$cx" "$cy"
+    else
+        fail "the quickshell layer didn't map ($WORK/qs-cursor.log)"
+    fi
+    kill "$QS" 2>/dev/null; sleep 1
+else
+    echo "  no quickshell, layer case skipped"
+    open_win gone-me -o colors-dark.background=ff00ff # a scene to release below
+    shot scene
+fi
+
+# the scene buffers go 10 s after the last capture that drew the scene
+released=
+for _ in $(seq 48); do
+    if awk '/scene: .* drawn without/ { d = NR } /scene: released the idle framebuffers/ { r = NR } END { exit !(d && r > d) }' "$WORK/trace.log"; then
+        released=1
+        break
+    fi
+    sleep 0.25
+done
+[ -n "$released" ] && pass "idle scene framebuffers released" || fail "idle scene framebuffers not released within 12 s ($WORK/trace.log)"
 
 pkill -xu "$(id -u)" Hyprland
 echo

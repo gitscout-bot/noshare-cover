@@ -16,6 +16,27 @@ namespace nsc {
 
         SP<Render::IFramebuffer> g_sceneFB, g_sceneZoomFB;
 
+        // The scene buffers (a monitor-sized framebuffer, one more under cursor zoom) go
+        // when no capture has drawn the scene for this long.
+        SP<CEventLoopTimer> g_sceneIdle;
+        constexpr auto      SCENE_IDLE = std::chrono::seconds(10);
+
+        void sceneIdle(SP<CEventLoopTimer> self, void*) {
+            g_sceneFB.reset();
+            g_sceneZoomFB.reset();
+            NSC_TRACE("scene: released the idle framebuffers\n");
+        }
+
+        void armSceneIdle() {
+            if (!g_pEventLoopManager)
+                return;
+            if (!g_sceneIdle) {
+                g_sceneIdle = makeShared<CEventLoopTimer>(SCENE_IDLE, sceneIdle, nullptr);
+                g_pEventLoopManager->addTimer(g_sceneIdle);
+            } else
+                g_sceneIdle->updateTimeout(SCENE_IDLE);
+        }
+
         // fb allocated like the monitor's mirror image
         SP<Render::IFramebuffer> likeMirror(SP<Render::IFramebuffer>& fb, const char* name, const SP<Render::IFramebuffer>& mirror) {
             if (!fb)
@@ -46,7 +67,7 @@ namespace nsc {
         return out;
     }
 
-    CSceneSwap::CSceneSwap(Render::CRenderContext& ctx, const PHLMONITOR& mon, const std::unordered_set<uintptr_t>& left) {
+    CSceneSwap::CSceneSwap(Render::CRenderContext& ctx, const PHLMONITOR& mon, const std::unordered_set<uintptr_t>& left, bool cursor) {
         const auto res = mon->resources();
         // locked: the mirror holds the lock screen, nothing to leave out
         if (res.expired() || !res->hasMirrorFB() || mon->isMirror() || (g_pSessionLockManager && g_pSessionLockManager->isSessionLocked()))
@@ -89,8 +110,9 @@ namespace nsc {
                 const auto          redirect = g_pHyprRenderer->redirectPass(ctx, &pass);
                 const auto          now      = Time::steadyNow();
                 Render::CMonitorScene{mon}.draw(ctx, now);
-                // a software cursor is drawn into the frame, so the mirror image has it
-                if (g_pHyprRenderer->shouldRenderCursor()) {
+                // a software cursor is drawn into the frame, so the mirror image has it; here
+                // only for a capture that asked for the cursor
+                if (cursor && g_pHyprRenderer->shouldRenderCursor()) {
                     CRegion damage = full;
                     Pointer::mgr()->renderSoftwareCursorsFor(ctx, mon, now, damage);
                 }
@@ -104,6 +126,7 @@ namespace nsc {
             }
         }
         NSC_TRACE("scene: %s drawn without %zu transparent surface(s)\n", mon->m_name.c_str(), left.size());
+        armSceneIdle();
         m_mirror = mirror;
         m_real   = std::exchange(SFramebufferAccess::texture(*mirror), out->getTexture());
     }
@@ -116,9 +139,9 @@ namespace nsc {
     // A software cursor is part of the monitor's image, and the covers went over it: draw
     // it again on top, only where something was painted (elsewhere the image still has it).
     // A hardware cursor that the client asked for is added by Hyprland when the capture
-    // ends, over everything already.
-    void cursorOverCovers(Render::CRenderContext& ctx, const PHLMONITOR& mon, const Vector2D& capturePos) {
-        if (!g_cfgCursorOverCovers || !g_cfgCursorOverCovers->value() || g_painted.empty() || !Pointer::mgr()->softwareLockedFor(mon) ||
+    // ends, over everything already. A capture without the cursor gets none.
+    void cursorOverCovers(Render::CRenderContext& ctx, const PHLMONITOR& mon, const Vector2D& capturePos, bool cursor) {
+        if (!cursor || !g_cfgCursorOverCovers || !g_cfgCursorOverCovers->value() || g_painted.empty() || !Pointer::mgr()->softwareLockedFor(mon) ||
             !g_pHyprRenderer->shouldRenderCursor())
             return;
         const auto          state = ctx.saveDrawState();
@@ -138,6 +161,12 @@ namespace nsc {
     }
 
     void releaseScene() {
+        if (g_sceneIdle) {
+            g_sceneIdle->cancel();
+            if (g_pEventLoopManager)
+                g_pEventLoopManager->removeTimer(g_sceneIdle);
+            g_sceneIdle.reset();
+        }
         g_sceneFB.reset();
         g_sceneZoomFB.reset();
     }
