@@ -38,9 +38,15 @@ namespace nsc {
         }
 
         // fb allocated like the monitor's mirror image
-        SP<Render::IFramebuffer> likeMirror(SP<Render::IFramebuffer>& fb, const char* name, const SP<Render::IFramebuffer>& mirror) {
-            if (!fb)
+        // stencil: the scene is drawn into it, and blur under a layer with ignore_alpha marks the
+        // layer's pixels in the stencil first; without one the blur fills the layer's whole box.
+        // Attached before the first alloc, which sizes it with the framebuffer, as Hyprland does.
+        SP<Render::IFramebuffer> likeMirror(SP<Render::IFramebuffer>& fb, const char* name, const SP<Render::IFramebuffer>& mirror, bool stencil) {
+            if (!fb) {
                 fb = g_pHyprRenderer->createFB(name);
+                if (fb && stencil)
+                    fb->addStencil(g_pHyprRenderer->createStencilTexture(int(mirror->m_size.x), int(mirror->m_size.y)));
+            }
             if (!fb || !fb->alloc(int(mirror->m_size.x), int(mirror->m_size.y), mirror->m_drmFormat))
                 return nullptr;
             fb->setImageDescription(mirror->imageDescription());
@@ -74,9 +80,9 @@ namespace nsc {
             return;
         const auto mirror = res->mirrorFB();
         const auto size   = mon->m_transformedSize;
-        const auto fb     = mirror->m_size == size ? likeMirror(g_sceneFB, "noshare-cover scene", mirror) : nullptr;
+        const auto fb     = mirror->m_size == size ? likeMirror(g_sceneFB, "noshare-cover scene", mirror, true) : nullptr;
         const auto zoom   = zoomBox(mon);
-        const auto out    = !fb || !zoom ? fb : likeMirror(g_sceneZoomFB, "noshare-cover zoomed scene", mirror);
+        const auto out    = !fb || !zoom ? fb : likeMirror(g_sceneZoomFB, "noshare-cover zoomed scene", mirror, false);
         if (!out) {
             NSC_TRACE("scene: can't draw %s without the transparent surfaces\n", mon->m_name.c_str());
             return;

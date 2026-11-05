@@ -123,7 +123,8 @@ capture asked for was always on top.
 
 A software cursor goes into a capture (in the transparent scene and over covers) only when the
 client asked for the cursor: `grim -c`, a stream with the cursor embedded. The scene buffers
-(about 15 MB for a 2560x1440 monitor, as much again under cursor zoom) are freed 10 s after the
+(about 30 MB for a 2560x1440 monitor: the picture and its stencil, which blur under a layer
+with `ignore_alpha` needs; 15 MB more under cursor zoom) are freed 10 s after the
 last capture that needed them.
 
 The field names of the original plugin (`["no_screen_share_cover:path_cover"]`,
