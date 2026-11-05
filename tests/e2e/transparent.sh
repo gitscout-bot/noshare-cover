@@ -49,6 +49,7 @@ hl.window_rule({ match = { class = "gone-me" }, no_screen_share = true, no_scree
                  float = true, size = { 700, 500 }, move = { 600, 300 } })
 hl.window_rule({ match = { class = "glass" }, float = true, size = { 500, 400 }, move = { 1000, 450 } })
 hl.layer_rule({ match = { namespace = "nsc-gone" }, no_screen_share = true, no_screen_share_cover = "transparent" })
+hl.layer_rule({ match = { namespace = "nsc-frosted" }, blur = true, ignore_alpha = 0.3 })
 LUA
 }
 
@@ -180,7 +181,53 @@ check_frame "zoomed" zoomed ref-zoomed
 echo "== blur: a translucent window over the transparent one"
 setup "$WORK/cover.png" 1 ref-blur true
 open_win glass -o colors-dark.alpha=0.8
+# and a layer that blurs only under its opaque middle (ignore_alpha): the rest of its box,
+# fully transparent, must not blur what is under it in the scene either
+QSF=
+if command -v quickshell >/dev/null; then
+    mkdir -p "$WORK/qsf"
+    cat > "$WORK/qsf/shell.qml" <<QML
+import Quickshell
+import Quickshell.Wayland
+import QtQuick
+PanelWindow {
+    WlrLayershell.namespace: "nsc-frosted"
+    WlrLayershell.layer: WlrLayer.Overlay
+    exclusionMode: ExclusionMode.Ignore
+    anchors { top: true; left: true }
+    margins { top: 80; left: 60 }
+    implicitWidth: 600
+    implicitHeight: 300
+    color: "transparent"
+    Rectangle { anchors.centerIn: parent; width: 300; height: 120; radius: 40; color: "#99202020" }
+}
+QML
+    quickshell -p "$WORK/qsf/shell.qml" > "$WORK/qsf.log" 2>&1 &
+    QSF=$!
+    for _ in $(seq 40); do sleep 0.25; hctl layers -j | grep -q nsc-frosted && break; done
+    sleep 1
+    hctl layers -j | grep -q nsc-frosted || fail "the frosted quickshell layer didn't map ($WORK/qsf.log)"
+else
+    echo "  no quickshell, the ignore_alpha layer is left out"
+fi
 shot blur
+if [ -n "$QSF" ]; then
+    # grim in show_to sees the transparent window, so it gets Hyprland's own frame: the
+    # layer's box left of that window must be the same in the scene
+    hctl eval 'hl.config({ plugin = { no_screen_share_cover = { show_to = "grim" } } })' >/dev/null
+    shot frosted-shown
+    hctl eval 'hl.config({ plugin = { no_screen_share_cover = { show_to = "" } } })' >/dev/null
+    # left of the transparent window (grim in show_to sees it)
+    IFS='x+' read -r _ _ gx _ <<<"$(win_box gone-me)"
+    fw=$((gx - 80)); [ "$fw" -gt 520 ] && fw=520
+    magick "$WORK/blur.png" -crop "${fw}x300+60+80" +repage "$WORK/frosted.png"
+    magick "$WORK/frosted-shown.png" -crop "${fw}x300+60+80" +repage "$WORK/frosted-ref.png"
+    d=$(rmse frosted-ref frosted)
+    same "$d" && pass "ignore_alpha: the layer blurs only under its middle (RMSE $d)" \
+        || fail "ignore_alpha: the scene blurs the layer's whole box (RMSE $d, $WORK/frosted.png vs frosted-ref.png)"
+    kill "$QSF" 2>/dev/null; sleep 1
+    shot blur
+fi
 # the same screen once the transparent window has closed (1 s close animation)
 kill "$(win_pid gone-me)"
 sleep 2
